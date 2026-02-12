@@ -10,6 +10,11 @@
   <header>
     <h1>🧠 MRI DICOM Viewer</h1>
     <div id="patient-info"></div>
+    <div id="layout-selector">
+      <button class="layout-btn active" data-layout="quad" title="4-up Grid">⊞</button>
+      <button class="layout-btn" data-layout="3plus1" title="3+1 (3D Large)">◫</button>
+      <button class="layout-btn" data-layout="ax3d" title="Axial + 3D">◧</button>
+    </div>
   </header>
 
   <div id="app">
@@ -17,53 +22,62 @@
       <h2>Series</h2>
       <div id="series-list"></div>
       <div id="metadata-panel">
-        <h2>Metadata</h2>
-        <div id="metadata-content"></div>
+        <h2 class="collapsible collapsed" id="metadata-toggle">Metadata <span class="collapse-arrow">▶</span></h2>
+        <div id="metadata-content" style="display:none"></div>
+      </div>
+      <div id="bookmarks-section">
+        <h2>Saved Views</h2>
+        <button id="save-bookmark-btn">⭐ Save View</button>
+        <div id="bookmark-list"></div>
+      </div>
+      <div id="export-section">
+        <h2>Export</h2>
+        <div class="export-controls">
+          <select id="export-res" title="Export resolution">
+            <option value="1">1×</option>
+            <option value="2" selected>2×</option>
+            <option value="4">4×</option>
+          </select>
+          <button id="export-png">Export PNG</button>
+        </div>
       </div>
     </aside>
 
     <main id="viewer-area">
-      <div class="view-row">
-        <div class="view-col-left">
-          <div class="view-panel" id="axial-panel">
-            <div class="view-label">Axial <span class="slice-info" id="axial-info"></span></div>
-            <div class="canvas-wrap" style="aspect-ratio: 1 / 1;"><canvas id="axial-canvas"></canvas></div>
-            <input type="range" id="axial-slider" min="0" max="0" value="0">
-          </div>
+      <div id="quad-view">
+        <div class="view-panel" id="axial-panel">
+          <div class="view-label">Axial <span class="slice-info" id="axial-info"></span><button class="expand-btn" data-panel="axial-panel" title="Expand">⛶</button></div>
+          <div class="canvas-wrap" id="axial-wrap"><canvas id="axial-canvas"></canvas></div>
+          <input type="range" id="axial-slider" min="0" max="0" value="0">
         </div>
-        <div class="view-col-right">
-          <div class="view-panel" id="sagittal-panel">
-            <div class="view-label">Sagittal <span class="slice-info" id="sagittal-info"></span></div>
-            <div class="canvas-wrap" id="sagittal-wrap"><canvas id="sagittal-canvas"></canvas></div>
-            <input type="range" id="sagittal-slider" min="0" max="0" value="0">
-          </div>
-          <div class="view-panel" id="coronal-panel">
-            <div class="view-label">Coronal <span class="slice-info" id="coronal-info"></span></div>
-            <div class="canvas-wrap" id="coronal-wrap"><canvas id="coronal-canvas"></canvas></div>
-            <input type="range" id="coronal-slider" min="0" max="0" value="0">
-          </div>
+        <div class="view-panel" id="sagittal-panel">
+          <div class="view-label">Sagittal <span class="slice-info" id="sagittal-info"></span><button class="expand-btn" data-panel="sagittal-panel" title="Expand">⛶</button></div>
+          <div class="canvas-wrap" id="sagittal-wrap"><canvas id="sagittal-canvas"></canvas></div>
+          <input type="range" id="sagittal-slider" min="0" max="0" value="0">
         </div>
-      </div>
-      <div id="view-toggle-bar">
-        <button id="btn-2d" class="view-toggle active">2D Slices</button>
-        <button id="btn-3d" class="view-toggle">3D Volume</button>
-      </div>
-      <div id="volume3d-container" class="hidden">
-        <canvas id="volume3d-canvas"></canvas>
-        <div id="volume3d-controls">
-          <div class="vol-controls-left">
-            <label>Threshold: <input type="range" id="vol-threshold" min="0" max="1" step="0.01" value="0"> <span id="vol-threshold-val">0</span></label>
-            <label>Opacity: <input type="range" id="vol-opacity" min="0.1" max="10" step="0.1" value="5"> <span id="vol-opacity-val">5</span></label>
-            <label>Steps: <input type="range" id="vol-steps" min="64" max="512" step="16" value="256"> <span id="vol-steps-val">256</span></label>
-          </div>
-          <div class="vol-controls-right">
-            <div class="clip-grid">
-              <label>Left <input type="range" id="clip-x-min" min="0" max="1" step="0.01" value="0"></label>
-              <label>Right <input type="range" id="clip-x-max" min="0" max="1" step="0.01" value="1"></label>
-              <label>Front <input type="range" id="clip-y-min" min="0" max="1" step="0.01" value="0"></label>
-              <label>Back <input type="range" id="clip-y-max" min="0" max="1" step="0.01" value="1"></label>
-              <label>Top <input type="range" id="clip-z-min" min="0" max="1" step="0.01" value="0"></label>
-              <label>Bottom <input type="range" id="clip-z-max" min="0" max="1" step="0.01" value="1"></label>
+        <div class="view-panel" id="coronal-panel">
+          <div class="view-label">Coronal <span class="slice-info" id="coronal-info"></span><button class="expand-btn" data-panel="coronal-panel" title="Expand">⛶</button></div>
+          <div class="canvas-wrap" id="coronal-wrap"><canvas id="coronal-canvas"></canvas></div>
+          <input type="range" id="coronal-slider" min="0" max="0" value="0">
+        </div>
+        <div id="view-divider" class="view-divider"></div>
+        <div id="view-divider-h" class="view-divider-h"></div>
+        <div id="view-divider-v2" class="view-divider-v2"></div>
+        <div class="view-panel" id="volume3d-panel">
+          <div class="view-label">3D Volume <button class="expand-btn" data-panel="volume3d-panel" title="Expand">⛶</button></div>
+          <div id="volume3d-container">
+            <canvas id="volume3d-canvas"></canvas>
+            <div id="volume3d-controls">
+              <div class="vol-controls-left">
+                <label>Threshold: <input type="range" id="vol-threshold" min="0" max="1" step="0.01" value="0"> <span id="vol-threshold-val">0</span></label>
+                <label>Opacity: <input type="range" id="vol-opacity" min="0.1" max="10" step="0.1" value="5"> <span id="vol-opacity-val">5</span></label>
+                <label>Steps: <input type="range" id="vol-steps" min="64" max="512" step="16" value="256"> <span id="vol-steps-val">256</span></label>
+              </div>
+              <div class="vol-controls-mid">
+                <label class="crosshair-3d-toggle" style="display:none"><input type="checkbox" id="show-slice-planes"> Crosshairs</label>
+                <label><input type="checkbox" id="show-clip-planes"> Clip Planes</label>
+                <button id="reset-clip-planes" style="padding:2px 8px;background:#0f3460;border:1px solid #333;color:#ccc;border-radius:3px;cursor:pointer;font-size:0.85em;">Reset</button>
+              </div>
             </div>
           </div>
         </div>
@@ -74,8 +88,8 @@
         <div id="load-progress"></div>
       </div>
       <div id="controls">
-        <label>Center: <input type="range" id="wc-slider" min="-1000" max="4000" value="400"> <span id="wc-val">400</span></label>
-        <label>Width: <input type="range" id="ww-slider" min="1" max="4000" value="800"> <span id="ww-val">800</span></label>
+        <label style="display:none">Center: <input type="range" id="wc-slider" min="-1000" max="4000" value="400"> <span id="wc-val">400</span></label>
+        <label style="display:none">Width: <input type="range" id="ww-slider" min="1" max="4000" value="800"> <span id="ww-val">800</span></label>
         <span class="preset-group">
           <button class="preset-btn" data-wc="400" data-ww="800">Soft Tissue</button>
           <button class="preset-btn" data-wc="700" data-ww="2000">Bone</button>
@@ -83,18 +97,36 @@
           <button class="preset-btn" data-wc="50" data-ww="400">Brain</button>
           <button class="preset-btn" data-wc="600" data-ww="2800">Full Range</button>
         </span>
-        <button id="reset-wl">Reset W/L</button>
         <label>Colormap: <select id="colormap-select">
           <option value="grayscale">Grayscale</option>
           <option value="hot">Hot</option>
           <option value="cool">Cool</option>
           <option value="bone">Bone</option>
-          <option value="jet" selected>Jet / Rainbow</option>
+          <option value="jet">Jet / Rainbow</option>
+          <option value="xray-neon" selected>X-Ray Neon</option>
+          <option value="human">Human</option>
           <option value="viridis">Viridis</option>
           <option value="inferno">Inferno</option>
         </select></label>
+        <label class="mip-toggle"><input type="checkbox" id="mip-checkbox"> MIP</label>
+        <label>Slab: <input type="range" id="mip-slab" min="1" max="22" value="5" disabled> <span id="mip-slab-val">5</span></label>
+        <label class="crosshair-toggle"><input type="checkbox" id="crosshair-checkbox"> Crosshairs</label>
+      </div>
+      <div id="histogram-panel">
+        <canvas id="histogram-canvas"></canvas>
       </div>
     </main>
+  </div>
+
+  <div id="bookmark-modal">
+    <div class="modal-box">
+      <h3>Save Bookmark</h3>
+      <input type="text" id="bookmark-name-input" placeholder="Bookmark name..." autofocus>
+      <div class="modal-buttons">
+        <button class="btn-cancel" id="bookmark-cancel">Cancel</button>
+        <button class="btn-save" id="bookmark-save">Save</button>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>

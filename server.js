@@ -4,7 +4,7 @@ const fs = require('fs');
 const dicomParser = require('dicom-parser');
 
 const app = express();
-const PORT = 3000;
+const PORT = 3080;
 const DATA_ROOT = path.join(__dirname, '1000022B', '1000022C');
 
 app.use(express.static(path.join(__dirname, 'public')));

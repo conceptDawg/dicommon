@@ -4,6 +4,15 @@
   let volumeTexture, colormapTexture;
   let isInitialized = false;
   let animFrameId = null;
+  let slicePlanes = { axial: null, sagittal: null, coronal: null };
+  let sliceHandles = []; // interactive drag handles
+  let clipPlaneObjects = []; // 6 clip planes with handles
+  let clipHandles = []; // handles for clip planes
+  let volSize = null; // stored for slice plane positioning
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
+  let dragHandle = null; // { handle, axis, plane }
+  let dragPlane = null; // THREE.Plane for constraining drag
 
   const container = document.getElementById('volume3d-container');
   const canvas3d = document.getElementById('volume3d-canvas');
@@ -12,26 +21,7 @@
   const stepsSlider = document.getElementById('vol-steps');
 
   // Toggle 2D/3D views
-  document.getElementById('btn-2d').addEventListener('click', () => {
-    document.getElementById('btn-2d').classList.add('active');
-    document.getElementById('btn-3d').classList.remove('active');
-    document.querySelector('.view-row').style.display = 'flex';
-    container.classList.add('hidden');
-    stopRender();
-  });
-
-  document.getElementById('btn-3d').addEventListener('click', () => {
-    document.getElementById('btn-3d').classList.add('active');
-    document.getElementById('btn-2d').classList.remove('active');
-    document.querySelector('.view-row').style.display = 'none';
-    container.classList.remove('hidden');
-    if (!isInitialized && volume) {
-      initVolume3D();
-    } else if (isInitialized) {
-      resize();
-      startRender();
-    }
-  });
+  // 3D is always visible in quad view — auto-init when volume loads
 
   // Vertex shader (GLSL3)
   // Transform ray origin and direction into the volume's local (object) space
@@ -70,6 +60,8 @@
     uniform vec3 volumeSize;
     uniform vec3 clipMin;
     uniform vec3 clipMax;
+    uniform bool mipMode;
+    uniform float mipSlabFrac;
 
     vec2 intersectBox(vec3 orig, vec3 dir) {
       vec3 boxMin = vec3(-0.5) * volumeSize;
@@ -91,6 +83,11 @@
       if (t.x > t.y) discard;
       t.x = max(t.x, 0.0);
 
+      if (mipMode && mipSlabFrac < 1.0) {
+        float rayLen = t.y - t.x;
+        t.y = t.x + rayLen * mipSlabFrac;
+      }
+
       float stepSize = (t.y - t.x) / float(numSteps);
       vec4 accum = vec4(0.0);
       vec3 pos = vOrigin + rayDir * t.x;
@@ -110,21 +107,34 @@
 
         float intensity = texture(volumeTex, texCoord).r;
 
-        if (intensity > threshold) {
-          vec3 color = texture(colormapTex, vec2(intensity, 0.5)).rgb;
-          float alpha = (intensity - threshold) / (1.0 - threshold + 0.001);
-          alpha = clamp(alpha * alpha * opacityScale * stepSize * 10.0, 0.0, 1.0);
+        if (mipMode) {
+          // Maximum Intensity Projection: track max intensity along ray
+          if (intensity > accum.a) {
+            accum.a = intensity;
+            accum.rgb = texture(colormapTex, vec2(intensity, 0.5)).rgb;
+          }
+        } else {
+          // Standard alpha compositing
+          if (intensity > threshold) {
+            vec3 color = texture(colormapTex, vec2(intensity, 0.5)).rgb;
+            float alpha = (intensity - threshold) / (1.0 - threshold + 0.001);
+            alpha = clamp(alpha * alpha * opacityScale * stepSize * 10.0, 0.0, 1.0);
 
-          accum.rgb += (1.0 - accum.a) * alpha * color;
-          accum.a += (1.0 - accum.a) * alpha;
+            accum.rgb += (1.0 - accum.a) * alpha * color;
+            accum.a += (1.0 - accum.a) * alpha;
 
-          if (accum.a > 0.95) break;
+            if (accum.a > 0.95) break;
+          }
         }
 
         pos += step;
       }
 
-      fragColor = vec4(accum.rgb, accum.a);
+      if (mipMode) {
+        fragColor = vec4(accum.rgb, 1.0);
+      } else {
+        fragColor = vec4(accum.rgb, accum.a);
+      }
     }
   `;
 
@@ -150,10 +160,21 @@
     return colormapTexture;
   }
 
+  let upsampledNumSlices = 0;
+  let upsampledSliceThickness = 0;
+
   function initVolume3D() {
     if (!volume || !volumeMeta.rows) return;
 
     const { rows, cols, numSlices, pixelSpacing, sliceThickness, windowCenter, windowWidth } = volumeMeta;
+
+    // Compute upsampling factor for Z axis (cap at 8x to limit memory)
+    const rawFactor = Math.round(sliceThickness / pixelSpacing);
+    const upsampleFactor = Math.min(rawFactor, 8);
+    upsampledNumSlices = (numSlices - 1) * upsampleFactor + 1;
+    upsampledSliceThickness = sliceThickness / upsampleFactor;
+
+    console.log(`3D volume: upsampling Z by ${upsampleFactor}x (${numSlices} → ${upsampledNumSlices} slices)`);
 
     // Create renderer, scene, camera only once
     if (!renderer) {
@@ -166,7 +187,7 @@
       setupControls();
     }
 
-    // Build 3D texture from volume data
+    // Build 3D texture from volume data with Z interpolation
     rebuildVolumeTexture();
 
     function rebuildVolumeTexture() {
@@ -174,34 +195,52 @@
       const ww = parseInt(document.getElementById('ww-slider').value);
       const lower = wc - ww / 2;
 
-      const texData = new Uint8Array(cols * rows * numSlices);
-      for (let z = 0; z < numSlices; z++) {
+      const texData = new Uint8Array(cols * rows * upsampledNumSlices);
+      for (let uz = 0; uz < upsampledNumSlices; uz++) {
+        // Map upsampled Z index back to original slice space
+        const origPos = uz / upsampleFactor;
+        const s0 = Math.floor(origPos);
+        const s1 = Math.min(s0 + 1, numSlices - 1);
+        const frac = origPos - s0;
+        const oneMinusFrac = 1 - frac;
+
         for (let y = 0; y < rows; y++) {
           for (let x = 0; x < cols; x++) {
-            const val = volume[z][y][x];
+            const val = volume[s0][y][x] * oneMinusFrac + volume[s1][y][x] * frac;
             const norm = Math.max(0, Math.min(255, ((val - lower) / ww) * 255));
-            texData[z * rows * cols + y * cols + x] = norm;
+            texData[uz * rows * cols + y * cols + x] = norm;
           }
         }
       }
 
       if (volumeTexture) {
-        volumeTexture.image.data = texData;
-        volumeTexture.needsUpdate = true;
-      } else {
-        volumeTexture = new THREE.Data3DTexture(texData, cols, rows, numSlices);
-        volumeTexture.format = THREE.RedFormat;
-        volumeTexture.type = THREE.UnsignedByteType;
-        volumeTexture.minFilter = THREE.LinearFilter;
-        volumeTexture.magFilter = THREE.LinearFilter;
-        volumeTexture.unpackAlignment = 1;
-        volumeTexture.needsUpdate = true;
+        volumeTexture.dispose();
+        volumeTexture = null;
+      }
+      volumeTexture = new THREE.Data3DTexture(texData, cols, rows, upsampledNumSlices);
+      volumeTexture.format = THREE.RedFormat;
+      volumeTexture.type = THREE.UnsignedByteType;
+      volumeTexture.minFilter = THREE.LinearFilter;
+      volumeTexture.magFilter = THREE.LinearFilter;
+      volumeTexture.unpackAlignment = 1;
+      volumeTexture.needsUpdate = true;
+
+      // Update the shader uniform to point to the new texture
+      if (mesh) {
+        mesh.material.uniforms.volumeTex.value = volumeTexture;
       }
     }
 
+    // Debounced rebuild — 78M voxels is expensive
+    let rebuildTimer = null;
+    function debouncedRebuild() {
+      if (rebuildTimer) clearTimeout(rebuildTimer);
+      rebuildTimer = setTimeout(rebuildVolumeTexture, 100);
+    }
+
     // Listen for window/level changes to update 3D texture
-    document.getElementById('wc-slider').addEventListener('input', rebuildVolumeTexture);
-    document.getElementById('ww-slider').addEventListener('input', rebuildVolumeTexture);
+    document.getElementById('wc-slider').addEventListener('input', debouncedRebuild);
+    document.getElementById('ww-slider').addEventListener('input', debouncedRebuild);
     // Also catch preset button clicks
     document.querySelectorAll('.preset-btn').forEach(btn => {
       btn.addEventListener('click', () => setTimeout(rebuildVolumeTexture, 10));
@@ -210,12 +249,12 @@
     buildColormapTexture();
 
     // Compute volume physical size ratio
-    // X = cols * pixelSpacing, Y = rows * pixelSpacing, Z = numSlices * sliceThickness
+    // X = cols * pixelSpacing, Y = rows * pixelSpacing, Z = upsampled slices * new thickness
     const sizeX = cols * pixelSpacing;
     const sizeY = rows * pixelSpacing;
-    const sizeZ = numSlices * sliceThickness;
+    const sizeZ = upsampledNumSlices * upsampledSliceThickness;
     const maxDim = Math.max(sizeX, sizeY, sizeZ);
-    const volSize = new THREE.Vector3(sizeX / maxDim, sizeY / maxDim, sizeZ / maxDim);
+    volSize = new THREE.Vector3(sizeX / maxDim, sizeY / maxDim, sizeZ / maxDim);
 
     // Create box geometry matching volume proportions
     const geometry = new THREE.BoxGeometry(volSize.x, volSize.y, volSize.z);
@@ -230,6 +269,8 @@
         volumeSize: { value: volSize },
         clipMin: { value: new THREE.Vector3(0, 0, 0) },
         clipMax: { value: new THREE.Vector3(1, 1, 1) },
+        mipMode: { value: false },
+        mipSlabFrac: { value: 1.0 },
         volumeInverseModel: { value: new THREE.Matrix4() },
       },
       vertexShader,
@@ -249,6 +290,12 @@
     const wireframe = new THREE.LineSegments(wireGeo, wireMat);
     mesh.add(wireframe); // child of mesh so it rotates with it
 
+    // --- Slice overlay planes ---
+    volSize = volSize; // already set above
+    createSlicePlanes(volSize);
+    updateSlicePlanePositions();
+    createClipPlanes(volSize);
+
     isInitialized = true;
     resize();
     startRender();
@@ -259,9 +306,43 @@
     let isPanning = false;
     let prevX, prevY;
 
+    function getMouseNDC(e) {
+      const rect = canvas3d.getBoundingClientRect();
+      return new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+    }
+
+    function hitTestHandles(e) {
+      if (!mesh) return null;
+      const ndc = getMouseNDC(e);
+      raycaster.setFromCamera(ndc, camera);
+      const allHandles = [...sliceHandles, ...clipHandles].filter(h => h.visible);
+      if (!allHandles.length) return null;
+      const hits = raycaster.intersectObjects(allHandles);
+      return hits.length > 0 ? hits[0].object : null;
+    }
+
     canvas3d.addEventListener('mousedown', e => {
-      if (e.button === 2) { isPanning = true; }
-      else { isDragging = true; }
+      if (e.button === 2) { isPanning = true; prevX = e.clientX; prevY = e.clientY; e.preventDefault(); return; }
+
+      // Check for handle hit first
+      const handle = hitTestHandles(e);
+      if (handle && (handle.userData.isSliceHandle || handle.userData.isClipHandle)) {
+        dragHandle = handle;
+        // Create a drag plane perpendicular to the camera through the handle's world position
+        const handleWorldPos = new THREE.Vector3();
+        handle.getWorldPosition(handleWorldPos);
+        const camDir = new THREE.Vector3();
+        camera.getWorldDirection(camDir);
+        dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, handleWorldPos);
+        canvas3d.style.cursor = 'grabbing';
+        e.preventDefault();
+        return;
+      }
+
+      isDragging = true;
       prevX = e.clientX;
       prevY = e.clientY;
       e.preventDefault();
@@ -270,7 +351,46 @@
     canvas3d.addEventListener('contextmenu', e => e.preventDefault());
 
     window.addEventListener('mousemove', e => {
-      if (!isDragging && !isPanning) return;
+      // Handle dragging
+      if (dragHandle) {
+        const ndc = getMouseNDC(e);
+        raycaster.setFromCamera(ndc, camera);
+        const intersect = new THREE.Vector3();
+        raycaster.ray.intersectPlane(dragPlane, intersect);
+        if (!intersect || !volSize) return;
+
+        // Transform world position back to mesh local space
+        const localPos = mesh.worldToLocal(intersect.clone());
+        const axis = dragHandle.userData.axis;
+
+        let frac;
+        if (axis === 'z') frac = (localPos.z / volSize.z) + 0.5;
+        else if (axis === 'x') frac = (localPos.x / volSize.x) + 0.5;
+        else if (axis === 'y') frac = (localPos.y / volSize.y) + 0.5;
+        frac = Math.max(0, Math.min(1, frac));
+
+        if (dragHandle.userData.isClipHandle) {
+          // Clip plane handle
+          clipValues[dragHandle.userData.clipKey] = frac;
+          updateClipPlanePositions();
+        } else {
+          // Slice handle
+          const slider = document.getElementById(dragHandle.userData.sliderName);
+          slider.value = Math.round(frac * parseInt(slider.max));
+          slider.dispatchEvent(new Event('input'));
+          updateSlicePlanePositions();
+          if (window.renderAll) window.renderAll();
+        }
+        return;
+      }
+
+      if (!isDragging && !isPanning) {
+        // Hover cursor for handles
+        const handle = hitTestHandles(e);
+        canvas3d.style.cursor = handle ? 'grab' : 'default';
+        return;
+      }
+
       const dx = e.clientX - prevX;
       const dy = e.clientY - prevY;
       prevX = e.clientX;
@@ -287,6 +407,11 @@
     });
 
     window.addEventListener('mouseup', () => {
+      if (dragHandle) {
+        canvas3d.style.cursor = 'default';
+        dragHandle = null;
+        dragPlane = null;
+      }
       isDragging = false;
       isPanning = false;
     });
@@ -301,10 +426,32 @@
     if (!renderer) return;
     const w = container.clientWidth;
     const h = container.clientHeight - 40; // leave room for controls
+    if (w <= 0 || h <= 0) return;
     renderer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
+
+  window._resize3D = resize;
+
+  // Auto-resize when container size changes (quad view expand/collapse)
+  let resizeTimer = null;
+  let lastW = 0, lastH = 0;
+  new ResizeObserver((entries) => {
+    const entry = entries[0];
+    const w = entry.contentRect.width;
+    const h = entry.contentRect.height;
+    if (w === lastW && h === lastH) return;
+    lastW = w; lastH = h;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    // Use requestAnimationFrame to avoid blocking the layout transition
+    resizeTimer = setTimeout(() => {
+      requestAnimationFrame(() => {
+        resize();
+        resizeTimer = null;
+      });
+    }, 16);
+  }).observe(container);
 
   function startRender() {
     if (animFrameId) return;
@@ -343,23 +490,155 @@
     if (mesh) mesh.material.uniforms.numSteps.value = parseInt(stepsSlider.value);
   });
 
-  // Clipping slider events
-  ['x-min', 'x-max', 'y-min', 'y-max', 'z-min', 'z-max'].forEach(id => {
-    const el = document.getElementById('clip-' + id);
-    el.addEventListener('input', () => {
-      if (!mesh) return;
-      const u = mesh.material.uniforms;
-      u.clipMin.value.set(
-        parseFloat(document.getElementById('clip-x-min').value),
-        parseFloat(document.getElementById('clip-y-min').value),
-        parseFloat(document.getElementById('clip-z-min').value)
-      );
-      u.clipMax.value.set(
-        parseFloat(document.getElementById('clip-x-max').value),
-        parseFloat(document.getElementById('clip-y-max').value),
-        parseFloat(document.getElementById('clip-z-max').value)
-      );
+  // --- Interactive Clip Planes ---
+  let clipValues = { xMin: 0, xMax: 1, yMin: 0, yMax: 1, zMin: 0, zMax: 1 };
+
+  function createClipPlanes(vs) {
+    clipPlaneObjects.forEach(p => { if (p && mesh) mesh.remove(p); });
+    clipHandles.forEach(h => { if (h && mesh) mesh.remove(h); });
+    clipPlaneObjects = [];
+    clipHandles = [];
+
+    const handleSize = Math.min(vs.x, vs.y, vs.z) * 0.05;
+    const clipColor = 0xffaa00; // orange for clip planes
+
+    const makePlane = (w, h) => {
+      // Wireframe outline only — no filled plane
+      const shape = new THREE.BufferGeometry();
+      const hw = w / 2, hh = h / 2;
+      const verts = new Float32Array([
+        -hw, -hh, 0,  hw, -hh, 0,
+         hw, -hh, 0,  hw,  hh, 0,
+         hw,  hh, 0, -hw,  hh, 0,
+        -hw,  hh, 0, -hw, -hh, 0,
+      ]);
+      shape.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+      const mat = new THREE.LineBasicMaterial({ color: clipColor, transparent: true, opacity: 0.5 });
+      const p = new THREE.LineSegments(shape, mat);
+      p.renderOrder = 998;
+      mesh.add(p);
+      return p;
+    };
+
+    const makeHandle = (axis, clipKey) => {
+      const geo = new THREE.SphereGeometry(handleSize, 10, 10);
+      const mat = new THREE.MeshBasicMaterial({ color: clipColor, depthTest: false });
+      const h = new THREE.Mesh(geo, mat);
+      h.renderOrder = 1001;
+      h.userData = { isClipHandle: true, axis, clipKey };
+      mesh.add(h);
+      clipHandles.push(h);
+      return h;
+    };
+
+    // X-min (left): YZ plane at left edge
+    const xMinPlane = makePlane(vs.z, vs.y);
+    xMinPlane.rotation.y = Math.PI / 2;
+    xMinPlane.position.x = -vs.x * 0.5;
+    xMinPlane._clipKey = 'xMin';
+    xMinPlane._axis = 'x';
+    xMinPlane._handles = [makeHandle('x', 'xMin'), makeHandle('x', 'xMin')];
+    clipPlaneObjects.push(xMinPlane);
+
+    // X-max (right)
+    const xMaxPlane = makePlane(vs.z, vs.y);
+    xMaxPlane.rotation.y = Math.PI / 2;
+    xMaxPlane.position.x = vs.x * 0.5;
+    xMaxPlane._clipKey = 'xMax';
+    xMaxPlane._axis = 'x';
+    xMaxPlane._handles = [makeHandle('x', 'xMax'), makeHandle('x', 'xMax')];
+    clipPlaneObjects.push(xMaxPlane);
+
+    // Y-min (front)
+    const yMinPlane = makePlane(vs.x, vs.z);
+    yMinPlane.rotation.x = Math.PI / 2;
+    yMinPlane.position.y = -vs.y * 0.5;
+    yMinPlane._clipKey = 'yMin';
+    yMinPlane._axis = 'y';
+    yMinPlane._handles = [makeHandle('y', 'yMin'), makeHandle('y', 'yMin')];
+    clipPlaneObjects.push(yMinPlane);
+
+    // Y-max (back)
+    const yMaxPlane = makePlane(vs.x, vs.z);
+    yMaxPlane.rotation.x = Math.PI / 2;
+    yMaxPlane.position.y = vs.y * 0.5;
+    yMaxPlane._clipKey = 'yMax';
+    yMaxPlane._axis = 'y';
+    yMaxPlane._handles = [makeHandle('y', 'yMax'), makeHandle('y', 'yMax')];
+    clipPlaneObjects.push(yMaxPlane);
+
+    // Z-min (top)
+    const zMinPlane = makePlane(vs.x, vs.y);
+    zMinPlane.position.z = -vs.z * 0.5;
+    zMinPlane._clipKey = 'zMin';
+    zMinPlane._axis = 'z';
+    zMinPlane._handles = [makeHandle('z', 'zMin'), makeHandle('z', 'zMin')];
+    clipPlaneObjects.push(zMinPlane);
+
+    // Z-max (bottom)
+    const zMaxPlane = makePlane(vs.x, vs.y);
+    zMaxPlane.position.z = vs.z * 0.5;
+    zMaxPlane._clipKey = 'zMax';
+    zMaxPlane._axis = 'z';
+    zMaxPlane._handles = [makeHandle('z', 'zMax'), makeHandle('z', 'zMax')];
+    clipPlaneObjects.push(zMaxPlane);
+
+    updateClipPlanePositions();
+    const show = document.getElementById('show-clip-planes').checked;
+    setClipPlanesVisible(show);
+  }
+
+  function updateClipPlanePositions() {
+    if (!mesh || !volSize) return;
+    clipPlaneObjects.forEach(p => {
+      const key = p._clipKey;
+      const axis = p._axis;
+      const frac = clipValues[key];
+      const size = axis === 'x' ? volSize.x : axis === 'y' ? volSize.y : volSize.z;
+      const pos = (frac - 0.5) * size;
+
+      if (axis === 'x') {
+        p.position.x = pos;
+        if (p._handles) {
+          p._handles[0].position.set(pos, volSize.y * 0.5, 0);
+          p._handles[1].position.set(pos, -volSize.y * 0.5, 0);
+        }
+      } else if (axis === 'y') {
+        p.position.y = pos;
+        if (p._handles) {
+          p._handles[0].position.set(0, pos, volSize.z * 0.5);
+          p._handles[1].position.set(0, pos, -volSize.z * 0.5);
+        }
+      } else {
+        p.position.z = pos;
+        if (p._handles) {
+          p._handles[0].position.set(volSize.x * 0.5, 0, pos);
+          p._handles[1].position.set(-volSize.x * 0.5, 0, pos);
+        }
+      }
     });
+
+    // Update shader uniforms
+    if (mesh) {
+      mesh.material.uniforms.clipMin.value.set(clipValues.xMin, clipValues.yMin, clipValues.zMin);
+      mesh.material.uniforms.clipMax.value.set(clipValues.xMax, clipValues.yMax, clipValues.zMax);
+    }
+  }
+
+  function setClipPlanesVisible(show) {
+    clipPlaneObjects.forEach(p => {
+      p.visible = show;
+      if (p._handles) p._handles.forEach(h => h.visible = show);
+    });
+  }
+
+  document.getElementById('show-clip-planes').addEventListener('change', (e) => {
+    setClipPlanesVisible(e.target.checked);
+  });
+
+  document.getElementById('reset-clip-planes').addEventListener('click', () => {
+    clipValues = { xMin: 0, xMax: 1, yMin: 0, yMax: 1, zMin: 0, zMax: 1 };
+    updateClipPlanePositions();
   });
 
   // Update colormap when changed
@@ -368,6 +647,26 @@
     if (colormapTexture) {
       buildColormapTexture();
     }
+  });
+
+  // Sync MIP mode and slab to 3D shader
+  document.getElementById('mip-checkbox').addEventListener('change', (e) => {
+    if (mesh) {
+      mesh.material.uniforms.mipMode.value = e.target.checked;
+      // Sync slab value when MIP is toggled on
+      if (e.target.checked) {
+        const slabEl = document.getElementById('mip-slab');
+        const frac = parseInt(slabEl.value) / parseInt(slabEl.max || 1);
+        mesh.material.uniforms.mipSlabFrac.value = Math.min(1.0, frac);
+      }
+    }
+  });
+
+  document.getElementById('mip-slab').addEventListener('input', () => {
+    if (!mesh) return;
+    const slabEl = document.getElementById('mip-slab');
+    const frac = parseInt(slabEl.value) / parseInt(slabEl.max || 1);
+    mesh.material.uniforms.mipSlabFrac.value = Math.min(1.0, frac);
   });
 
   // Re-init when volume changes (hook into loadVolume)
@@ -388,7 +687,7 @@
       }
       isInitialized = false;
     }
-    if (!container.classList.contains('hidden') && volume) {
+    if (volume) {
       initVolume3D();
       // Force a re-render
       if (renderer && scene && camera) {
@@ -399,6 +698,218 @@
 
   // Patch the global loadVolume to reinit 3D after loading
   const _origSelectSeries = window.selectSeries;
+
+  // --- Slice Overlay Planes with Interactive Handles ---
+  function createSlicePlanes(vs) {
+    // Remove old planes and handles
+    Object.values(slicePlanes).forEach(p => { if (p && mesh) mesh.remove(p); });
+    sliceHandles.forEach(h => { if (h && mesh) mesh.remove(h); });
+    sliceHandles = [];
+
+    const makeplane = (w, h, color) => {
+      const geo = new THREE.PlaneGeometry(w, h);
+      const mat = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.15,
+        side: THREE.DoubleSide, depthWrite: false
+      });
+      const p = new THREE.Mesh(geo, mat);
+      p.renderOrder = 999;
+      mesh.add(p);
+      return p;
+    };
+
+    const handleSize = Math.min(vs.x, vs.y, vs.z) * 0.06;
+    const makeHandle = (color, axis, sliderName) => {
+      const geo = new THREE.SphereGeometry(handleSize, 12, 12);
+      const mat = new THREE.MeshBasicMaterial({ color, depthTest: false });
+      const h = new THREE.Mesh(geo, mat);
+      h.renderOrder = 1000;
+      h.userData = { isSliceHandle: true, axis, sliderName };
+      mesh.add(h);
+      sliceHandles.push(h);
+      return h;
+    };
+
+    // Axial (XY plane) — blue — handle on +X and -X edges
+    slicePlanes.axial = makeplane(vs.x, vs.y, 0x4488ff);
+    slicePlanes.axial._handles = [
+      makeHandle(0x4488ff, 'z', 'axial-slider'),
+      makeHandle(0x4488ff, 'z', 'axial-slider'),
+    ];
+
+    // Sagittal (YZ plane) — red — handle on +Z and -Z edges
+    slicePlanes.sagittal = makeplane(vs.z, vs.y, 0xff4444);
+    slicePlanes.sagittal.rotation.y = Math.PI / 2;
+    slicePlanes.sagittal._handles = [
+      makeHandle(0xff4444, 'x', 'sagittal-slider'),
+      makeHandle(0xff4444, 'x', 'sagittal-slider'),
+    ];
+
+    // Coronal (XZ plane) — green — handle on +X and -X edges
+    slicePlanes.coronal = makeplane(vs.x, vs.z, 0x44ff44);
+    slicePlanes.coronal.rotation.x = Math.PI / 2;
+    slicePlanes.coronal._handles = [
+      makeHandle(0x44ff44, 'y', 'coronal-slider'),
+      makeHandle(0x44ff44, 'y', 'coronal-slider'),
+    ];
+
+    const show = document.getElementById('show-slice-planes').checked;
+    Object.values(slicePlanes).forEach(p => {
+      p.visible = show;
+      if (p._handles) p._handles.forEach(h => h.visible = show);
+    });
+  }
+
+  function updateSlicePlanePositions() {
+    if (!mesh || !volSize || !slicePlanes.axial) return;
+
+    const { numSlices, cols, rows } = volumeMeta;
+
+    // Axial: Z position
+    const axialSliderEl = document.getElementById('axial-slider');
+    const axialFrac = parseInt(axialSliderEl.value) / Math.max(1, parseInt(axialSliderEl.max));
+    const axZ = (axialFrac - 0.5) * volSize.z;
+    slicePlanes.axial.position.z = axZ;
+    if (slicePlanes.axial._handles) {
+      slicePlanes.axial._handles[0].position.set(volSize.x * 0.5, 0, axZ);
+      slicePlanes.axial._handles[1].position.set(-volSize.x * 0.5, 0, axZ);
+    }
+
+    // Sagittal: X position
+    const sagFrac = parseInt(document.getElementById('sagittal-slider').value) / Math.max(1, cols - 1);
+    const sagX = (sagFrac - 0.5) * volSize.x;
+    slicePlanes.sagittal.position.x = sagX;
+    if (slicePlanes.sagittal._handles) {
+      slicePlanes.sagittal._handles[0].position.set(sagX, 0, volSize.z * 0.5);
+      slicePlanes.sagittal._handles[1].position.set(sagX, 0, -volSize.z * 0.5);
+    }
+
+    // Coronal: Y position
+    const corFrac = parseInt(document.getElementById('coronal-slider').value) / Math.max(1, rows - 1);
+    const corY = (corFrac - 0.5) * volSize.y;
+    slicePlanes.coronal.position.y = corY;
+    if (slicePlanes.coronal._handles) {
+      slicePlanes.coronal._handles[0].position.set(0, corY, volSize.z * 0.5);
+      slicePlanes.coronal._handles[1].position.set(0, corY, -volSize.z * 0.5);
+    }
+  }
+
+  // Listen for slider changes to update plane positions
+  ['axial-slider', 'sagittal-slider', 'coronal-slider'].forEach(id => {
+    document.getElementById(id).addEventListener('input', updateSlicePlanePositions);
+  });
+
+  // Expose globally so renderAll can sync 3D crosshairs
+  window._updateSlicePlanePositions = updateSlicePlanePositions;
+  window._rebuild3DColormap = buildColormapTexture;
+
+  // Toggle visibility (planes + handles) — syncs with 2D crosshairs
+  document.getElementById('show-slice-planes').addEventListener('change', (e) => {
+    Object.values(slicePlanes).forEach(p => {
+      if (p) p.visible = e.target.checked;
+      if (p && p._handles) p._handles.forEach(h => h.visible = e.target.checked);
+    });
+    // Sync 2D crosshairs
+    const cb = document.getElementById('crosshair-checkbox');
+    if (cb.checked !== e.target.checked) {
+      cb.checked = e.target.checked;
+      cb.dispatchEvent(new Event('change'));
+    }
+  });
+
+  // --- Screenshot Export (3D) ---
+  window._export3DScreenshot = function(multiplier) {
+    if (!renderer || !scene || !camera) return null;
+    const cssW = container.clientWidth;
+    const cssH = container.clientHeight - 40;
+    const exportW = cssW * multiplier;
+    const exportH = cssH * multiplier;
+    // Temporarily set pixel ratio to 1 so setSize gives exact buffer dimensions
+    const oldDpr = renderer.getPixelRatio();
+    renderer.setPixelRatio(1);
+    renderer.setSize(exportW, exportH, false);
+    camera.aspect = exportW / exportH;
+    camera.updateProjectionMatrix();
+    renderer.render(scene, camera);
+    const dataUrl = renderer.domElement.toDataURL('image/png');
+    // Restore
+    renderer.setPixelRatio(oldDpr);
+    renderer.setSize(cssW, cssH, false);
+    camera.aspect = cssW / cssH;
+    camera.updateProjectionMatrix();
+    renderer.render(scene, camera);
+    return dataUrl;
+  };
+
+  // Expose 3D state for bookmarks
+  window._get3DState = function() {
+    if (!camera || !mesh) return null;
+    return {
+      cameraX: camera.position.x, cameraY: camera.position.y, cameraZ: camera.position.z,
+      rotX: mesh.rotation.x, rotY: mesh.rotation.y, rotZ: mesh.rotation.z,
+      threshold: parseFloat(thresholdSlider.value),
+      opacity: parseFloat(opacitySlider.value),
+      steps: parseInt(stepsSlider.value),
+      clipXMin: clipValues.xMin, clipXMax: clipValues.xMax,
+      clipYMin: clipValues.yMin, clipYMax: clipValues.yMax,
+      clipZMin: clipValues.zMin, clipZMax: clipValues.zMax,
+      showSlicePlanes: document.getElementById('show-slice-planes').checked
+    };
+  };
+
+  window._set3DState = function(s) {
+    if (!s) {
+      // Reset to defaults
+      if (camera) camera.position.set(0, 0, 2.5);
+      if (mesh) mesh.rotation.set(0, 0, 0);
+      thresholdSlider.value = 0; document.getElementById('vol-threshold-val').textContent = '0';
+      opacitySlider.value = 5; document.getElementById('vol-opacity-val').textContent = '5';
+      stepsSlider.value = 256; document.getElementById('vol-steps-val').textContent = '256';
+      if (mesh) {
+        mesh.material.uniforms.threshold.value = 0;
+        mesh.material.uniforms.opacityScale.value = 5;
+        mesh.material.uniforms.numSteps.value = 256;
+      }
+      clipValues = { xMin: 0, xMax: 1, yMin: 0, yMax: 1, zMin: 0, zMax: 1 };
+      updateClipPlanePositions();
+      buildColormapTexture();
+      return;
+    }
+    if (camera) { camera.position.set(s.cameraX, s.cameraY, s.cameraZ); }
+    if (mesh) { mesh.rotation.set(s.rotX, s.rotY, s.rotZ); }
+
+    thresholdSlider.value = s.threshold;
+    document.getElementById('vol-threshold-val').textContent = s.threshold;
+    opacitySlider.value = s.opacity;
+    document.getElementById('vol-opacity-val').textContent = s.opacity;
+    stepsSlider.value = s.steps;
+    document.getElementById('vol-steps-val').textContent = s.steps;
+
+    if (mesh) {
+      mesh.material.uniforms.threshold.value = s.threshold;
+      mesh.material.uniforms.opacityScale.value = s.opacity;
+      mesh.material.uniforms.numSteps.value = s.steps;
+    }
+
+    clipValues.xMin = s.clipXMin; clipValues.xMax = s.clipXMax;
+    clipValues.yMin = s.clipYMin; clipValues.yMax = s.clipYMax;
+    clipValues.zMin = s.clipZMin; clipValues.zMax = s.clipZMax;
+    updateClipPlanePositions();
+
+    document.getElementById('show-slice-planes').checked = s.showSlicePlanes;
+    Object.values(slicePlanes).forEach(p => {
+      if (p) p.visible = s.showSlicePlanes;
+      if (p && p._handles) p._handles.forEach(h => h.visible = s.showSlicePlanes);
+    });
+
+    // Rebuild colormap and MIP state
+    buildColormapTexture();
+    if (mesh) {
+      mesh.material.uniforms.mipMode.value = document.getElementById('mip-checkbox').checked;
+      const slabEl = document.getElementById('mip-slab');
+      mesh.material.uniforms.mipSlabFrac.value = parseInt(slabEl.value) / parseInt(slabEl.max || 1);
+    }
+  };
 
   window.addEventListener('resize', resize);
 })();

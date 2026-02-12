@@ -20,7 +20,21 @@ header {
 }
 
 header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
-#patient-info { font-size: 0.85em; color: #999; }
+#patient-info { font-size: 0.85em; color: #999; flex: 1; }
+
+#layout-selector { display: flex; gap: 4px; margin-left: auto; }
+.layout-btn {
+  background: #0f3460;
+  border: 1px solid #333;
+  color: #999;
+  font-size: 1.1em;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.layout-btn:hover { color: #fff; border-color: #666; }
+.layout-btn.active { background: #e94560; color: #fff; border-color: #e94560; }
 
 #app {
   display: flex;
@@ -57,6 +71,56 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
 #metadata-content { font-size: 0.78em; line-height: 1.6; color: #999; }
 #metadata-content .label { color: #e94560; }
 
+.collapsible { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+.collapsible:hover { color: #fff; }
+.collapse-arrow { font-size: 0.7em; transition: transform 0.2s; }
+.collapsible:not(.collapsed) .collapse-arrow { transform: rotate(90deg); }
+
+#bookmarks-section { margin-top: 16px; }
+#bookmarks-section h2 { font-size: 0.9em; color: #e94560; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+#bookmarks-section #save-bookmark-btn {
+  width: 100%;
+  padding: 6px 12px;
+  background: #e94560;
+  border: none;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.82em;
+  margin-bottom: 8px;
+}
+#bookmarks-section #save-bookmark-btn:hover { background: #d63a55; }
+
+#bookmark-list { display: flex; flex-direction: column; gap: 4px; }
+#bookmark-list .bookmark-chip {
+  width: 100%;
+  justify-content: space-between;
+}
+
+#export-section { margin-top: 16px; }
+#export-section h2 { font-size: 0.9em; color: #e94560; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+.export-controls { display: flex; gap: 6px; }
+.export-controls select {
+  flex: 0 0 auto;
+  background: #0f3460;
+  color: #ccc;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 0.82em;
+}
+.export-controls button {
+  flex: 1;
+  padding: 6px 12px;
+  background: #e94560;
+  border: none;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.82em;
+}
+.export-controls button:hover { background: #d63a55; }
+
 #viewer-area {
   flex: 1;
   display: flex;
@@ -66,28 +130,70 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
   overflow: hidden;
 }
 
-.view-row {
-  display: flex;
+#quad-view {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
   flex: 1;
-  gap: 8px;
+  gap: 4px;
   min-height: 0;
 }
 
-.view-col-left {
-  flex: 1 1 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  min-width: 0;
+#quad-view.expanded {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
 }
 
-.view-col-right {
-  flex: 0 0 auto;
-  width: 30%;
+#quad-view.expanded > .view-panel {
+  display: none;
+}
+
+#quad-view.expanded > .view-panel.expanded-panel {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 0;
+}
+
+/* 3+1 layout: axial top-left, sagittal+coronal bottom-left, 3D full right */
+#quad-view.layout-3plus1 {
+  grid-template-columns: 1fr 4px 2fr 4px 3fr;
+  grid-template-rows: 2fr 4px 1fr;
+}
+#quad-view.layout-3plus1 #axial-panel { grid-row: 1; grid-column: 1 / 4; }
+#quad-view.layout-3plus1 #view-divider-h { grid-row: 2; grid-column: 1 / 4; display: block; }
+#quad-view.layout-3plus1 #sagittal-panel { grid-row: 3; grid-column: 1; }
+#quad-view.layout-3plus1 #view-divider-v2 { grid-row: 3; grid-column: 2; display: block; }
+#quad-view.layout-3plus1 #coronal-panel { grid-row: 3; grid-column: 3; }
+#quad-view.layout-3plus1 #view-divider { grid-row: 1 / 4; grid-column: 4; display: block; }
+#quad-view.layout-3plus1 #volume3d-panel { grid-row: 1 / 4; grid-column: 5; }
+
+/* Axial + 3D side by side with draggable divider */
+#quad-view.layout-ax3d {
+  grid-template-columns: 1fr 4px 1fr;
+  grid-template-rows: 1fr;
+}
+#quad-view.layout-ax3d #axial-panel { grid-column: 1; }
+#quad-view.layout-ax3d #view-divider { grid-column: 2; display: block; }
+#quad-view.layout-ax3d #volume3d-panel { grid-column: 3; }
+#quad-view.layout-ax3d #sagittal-panel,
+#quad-view.layout-ax3d #coronal-panel { display: none; }
+
+.view-divider, .view-divider-v2 {
+  display: none;
+  background: #333;
+  cursor: col-resize;
+  transition: background 0.15s;
+  border-radius: 2px;
+}
+.view-divider-h {
+  display: none;
+  background: #333;
+  cursor: row-resize;
+  transition: background 0.15s;
+  border-radius: 2px;
+}
+.view-divider:hover, .view-divider.dragging,
+.view-divider-h:hover, .view-divider-h.dragging,
+.view-divider-v2:hover, .view-divider-v2.dragging {
+  background: #e94560;
 }
 
 .view-panel {
@@ -97,9 +203,15 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
   background: #000;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid #333;
+  border: 2px solid #333;
   min-width: 0;
   min-height: 0;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.view-panel.active-panel {
+  border-color: #e94560;
 }
 
 .view-label {
@@ -110,9 +222,27 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
   color: #e94560;
   background: #111;
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
 }
+
+.view-label .slice-info { flex: 1; text-align: right; }
+
+.expand-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid #444;
+  color: #999;
+  font-size: 1em;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 1.2;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.expand-btn:hover { color: #e94560; border-color: #e94560; }
 
 .slice-info { color: #666; }
 
@@ -126,15 +256,9 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
 }
 
 .canvas-wrap canvas {
-  max-width: 100%;
-  max-height: 100%;
-  image-rendering: pixelated;
-  object-fit: contain;
-}
-
-.view-col-left .canvas-wrap canvas {
   width: 100%;
   height: 100%;
+  image-rendering: pixelated;
   object-fit: contain;
 }
 
@@ -175,37 +299,18 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
 }
 .preset-btn:hover { background: #e94560 !important; }
 
-#view-toggle-bar {
-  display: flex;
-  gap: 4px;
-  padding: 4px 0;
-  flex-shrink: 0;
-}
+/* (view toggle bar removed — quad view is default) */
 
-.view-toggle {
-  padding: 5px 16px;
-  background: #0f3460;
-  border: 1px solid #333;
-  color: #ccc;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.8em;
-  transition: background 0.2s;
+#volume3d-panel {
+  position: relative;
 }
-.view-toggle:hover { background: #1a4a8a; }
-.view-toggle.active { background: #e94560; color: #fff; border-color: #e94560; }
 
 #volume3d-container {
   flex: 1;
   position: relative;
   min-height: 0;
-  background: #000;
-  border-radius: 8px;
   overflow: hidden;
-  border: 1px solid #333;
 }
-
-#volume3d-container.hidden { display: none; }
 
 #volume3d-canvas {
   width: 100%;
@@ -233,24 +338,7 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
   align-items: center;
 }
 
-.vol-controls-right {
-  margin-left: auto;
-}
-
-.clip-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px 12px;
-}
-
-.clip-grid label {
-  font-size: 0.85em;
-  color: #aaa;
-}
-
-.clip-grid input[type="range"] {
-  width: 70px;
-}
+/* clip-grid removed — clip planes are now interactive 3D handles */
 
 #volume3d-controls label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 #volume3d-controls input[type="range"] { width: 100px; accent-color: #e94560; }
@@ -278,3 +366,129 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 #load-progress { color: #666; }
+
+.vol-controls-mid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vol-controls-mid label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85em;
+  color: #ccc;
+  cursor: pointer;
+}
+
+/* MIP & Crosshair toggles */
+.mip-toggle, .crosshair-toggle { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.mip-toggle input, .crosshair-toggle input { accent-color: #e94560; }
+
+/* Histogram */
+#histogram-panel {
+  background: #16213e;
+  border-radius: 8px;
+  padding: 4px 8px;
+  flex-shrink: 0;
+}
+#histogram-canvas {
+  width: 100%;
+  height: 60px;
+  display: block;
+  border-radius: 4px;
+}
+
+/* Bookmarks */
+
+.bookmark-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: #0f3460;
+  border: 1px solid #333;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85em;
+  color: #ccc;
+  transition: background 0.2s;
+}
+
+.bookmark-chip:hover { background: #1a4a8a; }
+
+.bookmark-chip .bk-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.bookmark-chip .bk-delete {
+  background: none;
+  border: none;
+  color: #e94560;
+  cursor: pointer;
+  font-size: 1em;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.bookmark-chip .bk-delete:hover { color: #ff6b81; }
+
+/* Bookmark save modal */
+#bookmark-modal {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+}
+
+#bookmark-modal.visible { display: flex; }
+
+#bookmark-modal .modal-box {
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 8px;
+  padding: 20px;
+  min-width: 300px;
+}
+
+#bookmark-modal h3 { color: #e94560; margin-bottom: 12px; font-size: 1em; }
+
+#bookmark-modal input[type="text"] {
+  width: 100%;
+  padding: 6px 10px;
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 0.9em;
+  margin-bottom: 12px;
+}
+
+#bookmark-modal .modal-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+#bookmark-modal .modal-buttons button {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+#bookmark-modal .btn-save { background: #e94560; color: #fff; }
+#bookmark-modal .btn-cancel { background: #333; color: #ccc; }
+
+/* Canvas wrap needs position relative for overlay */
+.canvas-wrap { position: relative; }
+.crosshair-overlay {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
