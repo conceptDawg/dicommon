@@ -1,0 +1,18 @@
+node_modules/
+.DS_Store
+# DICOM data files (large binary, don't commit)
+1000022B/
+DICOMDIR
+CDVIEWER.EXE
+AUTORUN.INF
+HELP/
+IHE_PDI/
+JRE/
+PLUGINS/
+XTR_CONT/
+INDEX.HTM
+LOG4J.XML
+README.TXT
+RUN.CMD
+RUN.SH
+data/

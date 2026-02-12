@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MRI Viewer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🧠 MRI DICOM Viewer</h1>
+    <div id="patient-info"></div>
+  </header>
+
+  <div id="app">
+    <aside id="sidebar">
+      <h2>Series</h2>
+      <div id="series-list"></div>
+      <div id="metadata-panel">
+        <h2>Metadata</h2>
+        <div id="metadata-content"></div>
+      </div>
+    </aside>
+
+    <main id="viewer-area">
+      <div class="view-row">
+        <div class="view-col-left">
+          <div class="view-panel" id="axial-panel">
+            <div class="view-label">Axial <span class="slice-info" id="axial-info"></span></div>
+            <div class="canvas-wrap" style="aspect-ratio: 1 / 1;"><canvas id="axial-canvas"></canvas></div>
+            <input type="range" id="axial-slider" min="0" max="0" value="0">
+          </div>
+        </div>
+        <div class="view-col-right">
+          <div class="view-panel" id="sagittal-panel">
+            <div class="view-label">Sagittal <span class="slice-info" id="sagittal-info"></span></div>
+            <div class="canvas-wrap" id="sagittal-wrap"><canvas id="sagittal-canvas"></canvas></div>
+            <input type="range" id="sagittal-slider" min="0" max="0" value="0">
+          </div>
+          <div class="view-panel" id="coronal-panel">
+            <div class="view-label">Coronal <span class="slice-info" id="coronal-info"></span></div>
+            <div class="canvas-wrap" id="coronal-wrap"><canvas id="coronal-canvas"></canvas></div>
+            <input type="range" id="coronal-slider" min="0" max="0" value="0">
+          </div>
+        </div>
+      </div>
+      <div id="view-toggle-bar">
+        <button id="btn-2d" class="view-toggle active">2D Slices</button>
+        <button id="btn-3d" class="view-toggle">3D Volume</button>
+      </div>
+      <div id="volume3d-container" class="hidden">
+        <canvas id="volume3d-canvas"></canvas>
+        <div id="volume3d-controls">
+          <div class="vol-controls-left">
+            <label>Threshold: <input type="range" id="vol-threshold" min="0" max="1" step="0.01" value="0"> <span id="vol-threshold-val">0</span></label>
+            <label>Opacity: <input type="range" id="vol-opacity" min="0.1" max="10" step="0.1" value="5"> <span id="vol-opacity-val">5</span></label>
+            <label>Steps: <input type="range" id="vol-steps" min="64" max="512" step="16" value="256"> <span id="vol-steps-val">256</span></label>
+          </div>
+          <div class="vol-controls-right">
+            <div class="clip-grid">
+              <label>Left <input type="range" id="clip-x-min" min="0" max="1" step="0.01" value="0"></label>
+              <label>Right <input type="range" id="clip-x-max" min="0" max="1" step="0.01" value="1"></label>
+              <label>Front <input type="range" id="clip-y-min" min="0" max="1" step="0.01" value="0"></label>
+              <label>Back <input type="range" id="clip-y-max" min="0" max="1" step="0.01" value="1"></label>
+              <label>Top <input type="range" id="clip-z-min" min="0" max="1" step="0.01" value="0"></label>
+              <label>Bottom <input type="range" id="clip-z-max" min="0" max="1" step="0.01" value="1"></label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="loading" class="hidden">
+        <div class="spinner"></div>
+        <span>Loading volume data...</span>
+        <div id="load-progress"></div>
+      </div>
+      <div id="controls">
+        <label>Center: <input type="range" id="wc-slider" min="-1000" max="4000" value="400"> <span id="wc-val">400</span></label>
+        <label>Width: <input type="range" id="ww-slider" min="1" max="4000" value="800"> <span id="ww-val">800</span></label>
+        <span class="preset-group">
+          <button class="preset-btn" data-wc="400" data-ww="800">Soft Tissue</button>
+          <button class="preset-btn" data-wc="700" data-ww="2000">Bone</button>
+          <button class="preset-btn" data-wc="100" data-ww="300">Fat</button>
+          <button class="preset-btn" data-wc="50" data-ww="400">Brain</button>
+          <button class="preset-btn" data-wc="600" data-ww="2800">Full Range</button>
+        </span>
+        <button id="reset-wl">Reset W/L</button>
+        <label>Colormap: <select id="colormap-select">
+          <option value="grayscale">Grayscale</option>
+          <option value="hot">Hot</option>
+          <option value="cool">Cool</option>
+          <option value="bone">Bone</option>
+          <option value="jet" selected>Jet / Rainbow</option>
+          <option value="viridis">Viridis</option>
+          <option value="inferno">Inferno</option>
+        </select></label>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>
+  <script src="app.js"></script>
+  <script src="volume3d.js"></script>
+</body>
+</html>

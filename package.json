@@ -1,0 +1,14 @@
+{
+  "name": "mri-viewer",
+  "version": "1.0.0",
+  "description": "3D DICOM MRI Viewer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "dicom-parser": "^1.8.21",
+    "express": "^4.18.2"
+  }
+}
