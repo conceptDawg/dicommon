@@ -5,6 +5,8 @@ A radiology-style DICOM MRI viewer with multi-planar 2D views, interactive 3D vo
 ![Stack](https://img.shields.io/badge/stack-Node.js%20%2B%20Three.js-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
+![Dicommon Screenshot](public/images/screenshot1.png)
+
 ## Features
 
 ### Multi-Planar 2D Views
