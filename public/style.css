@@ -244,6 +244,19 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
 
 .expand-btn:hover { color: #e94560; border-color: #e94560; }
 
+.view-mode-select {
+  background: transparent;
+  border: none;
+  color: #e94560;
+  font-size: 1em;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  cursor: pointer;
+  outline: none;
+}
+.view-mode-select option { background: #111; color: #e94560; }
+
 .slice-info { color: #666; }
 
 .canvas-wrap {
@@ -318,7 +331,7 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
   display: block;
 }
 
-#volume3d-controls {
+#volume3d-controls, #solid3d-controls {
   position: absolute;
   bottom: 8px;
   left: 8px;

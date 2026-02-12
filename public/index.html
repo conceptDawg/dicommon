@@ -64,10 +64,12 @@
         <div id="view-divider-h" class="view-divider-h"></div>
         <div id="view-divider-v2" class="view-divider-v2"></div>
         <div class="view-panel" id="volume3d-panel">
-          <div class="view-label">3D Volume <button class="expand-btn" data-panel="volume3d-panel" title="Expand">⛶</button></div>
+          <div class="view-label"><select id="3d-mode-select" class="view-mode-select"><option value="volume">3D Volume</option><option value="solid">3D Solid</option></select>
+            <span id="solid-controls" style="display:none;"></span> <button class="expand-btn" data-panel="volume3d-panel" title="Expand">⛶</button></div>
           <div id="volume3d-container">
             <canvas id="volume3d-canvas"></canvas>
-            <div id="volume3d-controls">
+            <!-- Volume raycaster controls -->
+            <div id="volume3d-controls" class="vol3d-bar">
               <div class="vol-controls-left">
                 <label>Threshold: <input type="range" id="vol-threshold" min="0" max="1" step="0.01" value="0"> <span id="vol-threshold-val">0</span></label>
                 <label>Opacity: <input type="range" id="vol-opacity" min="0.1" max="10" step="0.1" value="5"> <span id="vol-opacity-val">5</span></label>
@@ -77,6 +79,24 @@
                 <label class="crosshair-3d-toggle" style="display:none"><input type="checkbox" id="show-slice-planes"> Crosshairs</label>
                 <label><input type="checkbox" id="show-clip-planes"> Clip Planes</label>
                 <button id="reset-clip-planes" style="padding:2px 8px;background:#0f3460;border:1px solid #333;color:#ccc;border-radius:3px;cursor:pointer;font-size:0.85em;">Reset</button>
+              </div>
+            </div>
+            <!-- Solid MC controls -->
+            <div id="solid3d-controls" class="vol3d-bar" style="display:none;">
+              <div class="vol-controls-left">
+                <label>Iso Level: <input type="range" id="solid-iso-ctrl" min="0.05" max="0.95" step="0.01" value="0.3"> <span id="solid-iso-ctrl-val">0.3</span></label>
+                <label>Opacity: <input type="range" id="solid-opacity" min="0.1" max="1" step="0.05" value="0.85"> <span id="solid-opacity-val">0.85</span></label>
+              </div>
+              <div class="vol-controls-mid">
+                <input type="checkbox" id="solid-wireframe" style="display:none">
+                <select id="solid-material" style="background:#0f3460;color:#ccc;border:1px solid #333;border-radius:4px;padding:2px 6px;font-size:0.85em;">
+                  <option value="phong" selected>Smooth</option>
+                  <option value="flat">Flat</option>
+                  <option value="bone">Bone</option>
+                  <option value="metallic">Metallic</option>
+                </select>
+                <label>Light: <input type="range" id="solid-light" min="0.2" max="5" step="0.1" value="3"> <span id="solid-light-val">3</span></label>
+                <label class="crosshair-3d-toggle" style="display:none"><input type="checkbox" id="solid-show-slice-planes"> Crosshairs</label>
               </div>
             </div>
           </div>
@@ -92,7 +112,7 @@
         <label style="display:none">Width: <input type="range" id="ww-slider" min="1" max="4000" value="800"> <span id="ww-val">800</span></label>
         <span class="preset-group">
           <button class="preset-btn" data-wc="400" data-ww="800">Soft Tissue</button>
-          <button class="preset-btn" data-wc="700" data-ww="2000">Bone</button>
+          <button class="preset-btn" data-wc="1078" data-ww="1845">Bone</button>
           <button class="preset-btn" data-wc="100" data-ww="300">Fat</button>
           <button class="preset-btn" data-wc="50" data-ww="400">Brain</button>
           <button class="preset-btn" data-wc="600" data-ww="2800">Full Range</button>
@@ -130,6 +150,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>
+  <script src="marching-cubes.js"></script>
   <script src="app.js"></script>
   <script src="volume3d.js"></script>
 </body>

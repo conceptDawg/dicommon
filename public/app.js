@@ -99,6 +99,21 @@ let crosshairsEnabled = false;
 
 // Histogram cache
 let histogramData = null;
+let clickedIntensity = null; // raw voxel intensity from last 2D click
+
+function syncIsoFromClick(rawIntensity) {
+  if (rawIntensity === null) return;
+  const wc = parseFloat(document.getElementById('wc-slider').value);
+  const ww = parseFloat(document.getElementById('ww-slider').value);
+  const isoVal = Math.max(0, Math.min(1, (rawIntensity - (wc - ww / 2)) / ww));
+  const isoCtrl = document.getElementById('solid-iso-ctrl');
+  if (isoCtrl) {
+    isoCtrl.value = isoVal.toFixed(2);
+    const valEl = document.getElementById('solid-iso-ctrl-val');
+    if (valEl) valEl.textContent = isoVal.toFixed(2);
+    isoCtrl.dispatchEvent(new Event('input'));
+  }
+}
 
 const axialCanvas = document.getElementById('axial-canvas');
 const sagittalCanvas = document.getElementById('sagittal-canvas');
@@ -472,25 +487,74 @@ function canvasClickToVoxel(canvas, e) {
 axialCanvas.addEventListener('click', (e) => {
   if (!volume) return;
   const { cx, cy } = canvasClickToVoxel(axialCanvas, e);
-  sagittalSlider.value = Math.round(Math.max(0, Math.min(volumeMeta.cols - 1, cx)));
-  coronalSlider.value = Math.round(Math.max(0, Math.min(volumeMeta.rows - 1, cy)));
+  const col = Math.round(Math.max(0, Math.min(volumeMeta.cols - 1, cx)));
+  const row = Math.round(Math.max(0, Math.min(volumeMeta.rows - 1, cy)));
+  sagittalSlider.value = col;
+  coronalSlider.value = row;
+  // Match exactly what the renderer draws (MIP or interpolated)
+  const interpIdx = parseInt(axialSlider.value);
+  const origPos = interpIdx / (volumeMeta.zRatio || 1);
+  const halfSlab = mipEnabled ? Math.floor(mipSlab / 2) : 0;
+  if (mipEnabled) {
+    clickedIntensity = mipValue(Math.round(origPos), row, col, halfSlab, 'axial');
+  } else {
+    const s0 = Math.min(Math.floor(origPos), volume.length - 1);
+    const s1 = Math.min(s0 + 1, volume.length - 1);
+    const frac = origPos - Math.floor(origPos);
+    clickedIntensity = (volume[s0][row] ? volume[s0][row][col] : 0) * (1 - frac)
+                     + (volume[s1][row] ? volume[s1][row][col] : 0) * frac;
+  }
+  syncIsoFromClick(clickedIntensity);
   renderAll();
+  renderHistogram();
 });
 
 sagittalCanvas.addEventListener('click', (e) => {
   if (!volume) return;
   const { cx, cy } = canvasClickToVoxel(sagittalCanvas, e);
-  axialSlider.value = Math.round(Math.max(0, Math.min(axialSlider.max, cx)));
-  coronalSlider.value = Math.round(Math.max(0, Math.min(volumeMeta.rows - 1, cy)));
+  const z = Math.round(Math.max(0, Math.min(axialSlider.max, cx)));
+  const row = Math.round(Math.max(0, Math.min(volumeMeta.rows - 1, cy)));
+  axialSlider.value = z;
+  coronalSlider.value = row;
+  const col = parseInt(sagittalSlider.value);
+  const origPos = z / (volumeMeta.zRatio || 1);
+  const halfSlab = mipEnabled ? Math.floor(mipSlab / 2) : 0;
+  if (mipEnabled) {
+    clickedIntensity = mipValue(Math.round(origPos), row, col, halfSlab, 'sagittal');
+  } else {
+    const s0 = Math.min(Math.floor(origPos), volume.length - 1);
+    const s1 = Math.min(s0 + 1, volume.length - 1);
+    const frac = origPos - Math.floor(origPos);
+    clickedIntensity = (volume[s0][row] ? volume[s0][row][col] : 0) * (1 - frac)
+                     + (volume[s1][row] ? volume[s1][row][col] : 0) * frac;
+  }
+  syncIsoFromClick(clickedIntensity);
   renderAll();
+  renderHistogram();
 });
 
 coronalCanvas.addEventListener('click', (e) => {
   if (!volume) return;
   const { cx, cy } = canvasClickToVoxel(coronalCanvas, e);
-  sagittalSlider.value = Math.round(Math.max(0, Math.min(volumeMeta.cols - 1, cx)));
-  axialSlider.value = Math.round(Math.max(0, Math.min(axialSlider.max, cy)));
+  const col = Math.round(Math.max(0, Math.min(volumeMeta.cols - 1, cx)));
+  const z = Math.round(Math.max(0, Math.min(axialSlider.max, cy)));
+  sagittalSlider.value = col;
+  axialSlider.value = z;
+  const row = parseInt(coronalSlider.value);
+  const origPos = z / (volumeMeta.zRatio || 1);
+  const halfSlab = mipEnabled ? Math.floor(mipSlab / 2) : 0;
+  if (mipEnabled) {
+    clickedIntensity = mipValue(Math.round(origPos), row, col, halfSlab, 'coronal');
+  } else {
+    const s0 = Math.min(Math.floor(origPos), volume.length - 1);
+    const s1 = Math.min(s0 + 1, volume.length - 1);
+    const frac = origPos - Math.floor(origPos);
+    clickedIntensity = (volume[s0][row] ? volume[s0][row][col] : 0) * (1 - frac)
+                     + (volume[s1][row] ? volume[s1][row][col] : 0) * frac;
+  }
+  syncIsoFromClick(clickedIntensity);
   renderAll();
+  renderHistogram();
 });
 
 document.getElementById('crosshair-checkbox').addEventListener('change', (e) => {
@@ -536,6 +600,14 @@ function computeHistogram() {
   histogramData = bins;
 }
 
+function getHistogramRange() {
+  const wc = parseFloat(wcSlider.value);
+  const ww = parseFloat(wwSlider.value);
+  const hMin = Math.min(volumeMeta._histMin || 0, wc - ww / 2);
+  const hMax = Math.max(volumeMeta._histMax || 1, wc + ww / 2);
+  return { hMin, hMax };
+}
+
 function renderHistogram() {
   const canvas = document.getElementById('histogram-canvas');
   if (!canvas) return;
@@ -551,8 +623,7 @@ function renderHistogram() {
   ctx.fillRect(0, 0, w, h);
 
   if (!histogramData) return;
-  const hMin = volumeMeta._histMin || 0;
-  const hMax = volumeMeta._histMax || 1;
+  const { hMin, hMax } = getHistogramRange();
   const range = hMax - hMin || 1;
 
   // Find max count (skip bin 0 which is often background)
@@ -595,6 +666,30 @@ function renderHistogram() {
   ctx.fillStyle = '#fff';
   if (lo >= 0 && lo <= w) { ctx.beginPath(); ctx.moveTo(lo - 5, 0); ctx.lineTo(lo + 5, 0); ctx.lineTo(lo, 8); ctx.fill(); }
   if (hi >= 0 && hi <= w) { ctx.beginPath(); ctx.moveTo(hi - 5, 0); ctx.lineTo(hi + 5, 0); ctx.lineTo(hi, 8); ctx.fill(); }
+
+  // Draw clicked intensity indicator
+  if (clickedIntensity !== null) {
+    const ix = ((clickedIntensity - hMin) / range) * w;
+    if (ix >= 0 && ix <= w) {
+      // Vertical hairline
+      ctx.strokeStyle = 'rgba(0, 200, 255, 0.7)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(ix, 0); ctx.lineTo(ix, h); ctx.stroke();
+      // Circle at bottom
+      ctx.beginPath();
+      ctx.arc(ix, h - 6, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#00c8ff';
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // Value label
+      ctx.fillStyle = '#00c8ff';
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = ix < w / 2 ? 'left' : 'right';
+      ctx.fillText(Math.round(clickedIntensity), ix + (ix < w / 2 ? 6 : -6), h - 2);
+    }
+  }
 }
 
 // Interactive histogram — drag edges to control window
@@ -607,14 +702,12 @@ function renderHistogram() {
   function getCSSWidth() { return hCanvas.getBoundingClientRect().width; }
 
   function xToIntensity(x) {
-    const hMin = volumeMeta._histMin || 0;
-    const hMax = volumeMeta._histMax || 1;
+    const { hMin, hMax } = getHistogramRange();
     return hMin + (x / getCSSWidth()) * (hMax - hMin);
   }
 
   function getEdgePositions() {
-    const hMin = volumeMeta._histMin || 0;
-    const hMax = volumeMeta._histMax || 1;
+    const { hMin, hMax } = getHistogramRange();
     const range = hMax - hMin || 1;
     const cw = getCSSWidth();
     const wc = parseFloat(wcSlider.value);
@@ -657,8 +750,7 @@ function renderHistogram() {
     const x = e.clientX - rect.left;
     const deltaIntensity = xToIntensity(x) - xToIntensity(dragStartX);
 
-    const hMin = volumeMeta._histMin || 0;
-    const hMax = volumeMeta._histMax || 1;
+    const { hMin, hMax } = getHistogramRange();
 
     if (dragMode === 'lo') {
       // Move low edge: adjust center and width, clamp to left edge
@@ -1035,7 +1127,6 @@ document.querySelectorAll('.layout-btn').forEach(btn => {
         apply3plus1Grid();
       } else if (activeDivider === divV2) {
         // Sub-vertical: sagittal vs coronal within left section
-        // Need to calculate relative to the left section width
         const leftPx = (splitV / 100) * rect.width;
         const relX = e.clientX - rect.left;
         splitV2 = Math.max(15, Math.min(85, (relX / leftPx) * 100));

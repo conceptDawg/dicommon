@@ -187,23 +187,67 @@
       setupControls();
     }
 
+    // Flatten volume for Web Worker (once per series load)
+    const flatVolume = [];
+    for (let s = 0; s < numSlices; s++) {
+      const flat = new Float32Array(rows * cols);
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          flat[y * cols + x] = volume[s][y][x];
+        }
+      }
+      flatVolume.push(flat);
+    }
+
+    // Web Worker for off-thread texture rebuild
+    let volumeWorker = null;
+    let workerBusy = false;
+    let pendingRebuild = false;
+    try {
+      volumeWorker = new Worker('volume-worker.js');
+      volumeWorker.onmessage = function(e) {
+        const { texData } = e.data;
+        applyVolumeTexture(new Uint8Array(texData));
+        workerBusy = false;
+        if (pendingRebuild) {
+          pendingRebuild = false;
+          rebuildVolumeTexture();
+        }
+      };
+    } catch(err) {
+      console.warn('Web Worker not available, falling back to sync rebuild', err);
+    }
+
     // Build 3D texture from volume data with Z interpolation
     rebuildVolumeTexture();
 
     function rebuildVolumeTexture() {
+      // Skip if 3D panel is hidden (e.g. 3+1 layout)
+      const panel3d = document.getElementById('volume3d-panel');
+      if (panel3d && getComputedStyle(panel3d).display === 'none') return;
+
       const wc = parseInt(document.getElementById('wc-slider').value);
       const ww = parseInt(document.getElementById('ww-slider').value);
-      const lower = wc - ww / 2;
 
+      if (volumeWorker) {
+        if (workerBusy) { pendingRebuild = true; return; }
+        workerBusy = true;
+        volumeWorker.postMessage({
+          volume: flatVolume,
+          cols, rows, numSlices, upsampledNumSlices, upsampleFactor, wc, ww
+        });
+        return;
+      }
+
+      // Fallback: synchronous rebuild
+      const lower = wc - ww / 2;
       const texData = new Uint8Array(cols * rows * upsampledNumSlices);
       for (let uz = 0; uz < upsampledNumSlices; uz++) {
-        // Map upsampled Z index back to original slice space
         const origPos = uz / upsampleFactor;
         const s0 = Math.floor(origPos);
         const s1 = Math.min(s0 + 1, numSlices - 1);
         const frac = origPos - s0;
         const oneMinusFrac = 1 - frac;
-
         for (let y = 0; y < rows; y++) {
           for (let x = 0; x < cols; x++) {
             const val = volume[s0][y][x] * oneMinusFrac + volume[s1][y][x] * frac;
@@ -212,11 +256,11 @@
           }
         }
       }
+      applyVolumeTexture(texData);
+    }
 
-      if (volumeTexture) {
-        volumeTexture.dispose();
-        volumeTexture = null;
-      }
+    function applyVolumeTexture(texData) {
+      if (volumeTexture) { volumeTexture.dispose(); volumeTexture = null; }
       volumeTexture = new THREE.Data3DTexture(texData, cols, rows, upsampledNumSlices);
       volumeTexture.format = THREE.RedFormat;
       volumeTexture.type = THREE.UnsignedByteType;
@@ -224,14 +268,10 @@
       volumeTexture.magFilter = THREE.LinearFilter;
       volumeTexture.unpackAlignment = 1;
       volumeTexture.needsUpdate = true;
-
-      // Update the shader uniform to point to the new texture
-      if (mesh) {
-        mesh.material.uniforms.volumeTex.value = volumeTexture;
-      }
+      if (mesh) { mesh.material.uniforms.volumeTex.value = volumeTexture; }
     }
 
-    // Debounced rebuild — 78M voxels is expensive
+    // Debounced rebuild — offloaded to worker but still debounce rapid changes
     let rebuildTimer = null;
     function debouncedRebuild() {
       if (rebuildTimer) clearTimeout(rebuildTimer);
@@ -647,6 +687,10 @@
     if (colormapTexture) {
       buildColormapTexture();
     }
+    // Update solid mesh vertex colors with new colormap
+    if (solidMesh && solidIntensities.length > 0) {
+      updateSolidGeometry();
+    }
   });
 
   // Sync MIP mode and slab to 3D shader
@@ -676,6 +720,16 @@
 
   // Expose re-init for when new volume loads
   window._reinit3D = function() {
+    // Clean up solid mesh
+    if (solidWorker) { solidWorker.terminate(); solidWorker = null; solidBuildInProgress = false; }
+    if (solidMesh && mesh) { mesh.remove(solidMesh); }
+    if (solidGeometry) { solidGeometry.dispose(); }
+    solidMesh = null;
+    solidGeometry = null;
+    solidPositions = [];
+    solidNormals = [];
+    solidIntensities = [];
+
     if (isInitialized) {
       // Dispose old volume resources but keep renderer/scene/camera
       if (volumeTexture) { volumeTexture.dispose(); volumeTexture = null; }
@@ -692,6 +746,11 @@
       // Force a re-render
       if (renderer && scene && camera) {
         renderer.render(scene, camera);
+      }
+      // If in solid mode, rebuild solid and keep volume hidden
+      if (currentSolidMode === 'solid') {
+        if (mesh) mesh.material.visible = false;
+        buildSolid();
       }
     }
   };
@@ -912,4 +971,319 @@
   };
 
   window.addEventListener('resize', resize);
+
+  // ==================== SOLID RENDERER (Marching Cubes) ====================
+  let solidMesh = null;
+  let solidGeometry = null;
+  let solidWorker = null;
+  let solidBuildInProgress = false;
+  let solidPositions = [];
+  let solidNormals = [];
+  let solidIntensities = [];
+  let solidLight1 = null, solidLight2 = null;
+  let currentSolidMode = 'volume'; // 'volume' or 'solid'
+
+  const generateBtn = document.getElementById('solid-generate'); // may not exist
+  const modeSelect = document.getElementById('3d-mode-select');
+  const solidControlsHeader = document.getElementById('solid-controls');
+  const volumeControlsBar = document.getElementById('volume3d-controls');
+  const solidControlsBar = document.getElementById('solid3d-controls');
+  let solidAutoRebuildTimer = null;
+
+  // Mode switching
+  if (modeSelect) {
+    modeSelect.addEventListener('change', () => {
+      currentSolidMode = modeSelect.value;
+      if (currentSolidMode === 'solid') {
+        // Show solid controls, hide volume controls
+        if (solidControlsHeader) solidControlsHeader.style.display = 'inline';
+        if (volumeControlsBar) volumeControlsBar.style.display = 'none';
+        if (solidControlsBar) solidControlsBar.style.display = 'flex';
+        // Hide raycaster, show solid — auto-build if no mesh yet
+        if (mesh) mesh.material.visible = false;
+        if (solidMesh) {
+          solidMesh.visible = true;
+        } else if (volume && volumeMeta.rows && renderer) {
+          buildSolid();
+        }
+      } else {
+        // Show volume controls, hide solid controls
+        if (solidControlsHeader) solidControlsHeader.style.display = 'none';
+        if (volumeControlsBar) volumeControlsBar.style.display = 'flex';
+        if (solidControlsBar) solidControlsBar.style.display = 'none';
+        // Show raycaster, hide solid
+        if (mesh) mesh.material.visible = true;
+        if (solidMesh) solidMesh.visible = false;
+      }
+    });
+  }
+
+  // Generate button
+  if (generateBtn) {
+    generateBtn.addEventListener('click', () => {
+      if (!volume || !volumeMeta.rows || !renderer) return;
+      buildSolid();
+    });
+  }
+
+  function buildSolid() {
+    const { rows, cols, numSlices, pixelSpacing, sliceThickness } = volumeMeta;
+
+    // Kill previous build
+    if (solidWorker) { solidWorker.terminate(); solidWorker = null; }
+    solidBuildInProgress = false;
+
+    // Remove old solid mesh
+    if (solidMesh && mesh) { mesh.remove(solidMesh); solidMesh = null; }
+    if (solidGeometry) { solidGeometry.dispose(); solidGeometry = null; }
+    solidPositions = [];
+    solidNormals = [];
+    solidIntensities = [];
+
+    // Flatten volume for worker
+    const flatVol = [];
+    for (let s = 0; s < numSlices; s++) {
+      const flat = new Float32Array(rows * cols);
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          flat[y * cols + x] = volume[s][y][x];
+        }
+      }
+      flatVol.push(flat);
+    }
+
+    const wc = parseInt(document.getElementById('wc-slider').value);
+    const ww = parseInt(document.getElementById('ww-slider').value);
+    const isoCtrl = document.getElementById('solid-iso-ctrl');
+    const isoValue = isoCtrl ? parseFloat(isoCtrl.value) : 0.3;
+
+    // Physical step sizes normalized to volSize
+    const maxDim = Math.max(cols * pixelSpacing, rows * pixelSpacing, numSlices * sliceThickness);
+    const stepX = pixelSpacing / maxDim;
+    const stepY = pixelSpacing / maxDim;
+    const stepZ = sliceThickness / maxDim;
+
+    // Create empty geometry and mesh — child of volume mesh so it rotates together
+    solidGeometry = new THREE.BufferGeometry();
+    solidMesh = new THREE.Mesh(solidGeometry, createSolidMaterial());
+    // Position so (0,0,0) maps to volume corner, centered on the volume cube
+    solidMesh.position.set(-volSize.x / 2, -volSize.y / 2, -volSize.z / 2);
+    mesh.add(solidMesh);
+
+    // Add lights if not yet
+    if (!solidLight1) {
+      solidLight1 = new THREE.DirectionalLight(0xffffff, 3.0);
+      solidLight1.position.set(1, 1, 2);
+      scene.add(solidLight1);
+      solidLight2 = new THREE.DirectionalLight(0x8888ff, 0.4);
+      solidLight2.position.set(-1, -0.5, -1);
+      scene.add(solidLight2);
+      scene.add(new THREE.AmbientLight(0x404040, 0.6));
+    }
+
+    // Hide volume raycaster mesh to show solid
+    if (mesh) mesh.material.visible = false;
+
+    // Show progress
+    updateSolidProgress(0, numSlices - 1);
+
+    // Start worker
+    solidBuildInProgress = true;
+    solidWorker = new Worker('marching-cubes-worker.js');
+    solidWorker.onmessage = function(e) {
+      const msg = e.data;
+      if (msg.type === 'batch') {
+        solidPositions.push(msg.positions);
+        solidNormals.push(msg.normals);
+        if (msg.intensities) solidIntensities.push(msg.intensities);
+        updateSolidGeometry();
+        updateSolidProgress(msg.slicesDone, msg.totalSlices);
+      } else if (msg.type === 'progress') {
+        updateSolidProgress(msg.slicesDone, msg.totalSlices);
+      } else if (msg.type === 'done') {
+        solidBuildInProgress = false;
+        updateSolidProgress(-1, 0);
+        if (generateBtn) generateBtn.textContent = 'Regenerate';
+      }
+    };
+
+    solidWorker.postMessage({
+      volume: flatVol,
+      cols, rows, numSlices,
+      isoValue, wc, ww,
+      stepX, stepY, stepZ
+    });
+
+    if (generateBtn) generateBtn.textContent = 'Building...';
+  }
+
+  function createSolidMaterial() {
+    const materialType = document.getElementById('solid-material').value;
+    const opacity = parseFloat(document.getElementById('solid-opacity').value);
+    const wireframe = document.getElementById('solid-wireframe').checked;
+    const lightIntensity = parseFloat(document.getElementById('solid-light').value);
+
+    // Update light intensity
+    if (solidLight1) solidLight1.intensity = lightIntensity;
+
+    const lut = colormaps[currentColormap];
+    const mid = lut[180];
+    const baseColor = new THREE.Color(mid[0] / 255, mid[1] / 255, mid[2] / 255);
+
+    let mat;
+    switch (materialType) {
+      case 'bone':
+        mat = new THREE.MeshPhongMaterial({
+          color: 0xffffff,
+          vertexColors: true,
+          specular: 0x444444,
+          shininess: 30,
+          side: THREE.DoubleSide,
+          flatShading: false,
+        });
+        break;
+      case 'metallic':
+        mat = new THREE.MeshPhongMaterial({
+          color: 0xffffff,
+          vertexColors: true,
+          specular: 0xffffff,
+          shininess: 100,
+          side: THREE.DoubleSide,
+          flatShading: false,
+        });
+        break;
+      case 'flat':
+        mat = new THREE.MeshPhongMaterial({
+          color: 0xffffff,
+          vertexColors: true,
+          side: THREE.DoubleSide,
+          flatShading: true,
+        });
+        break;
+      default: // phong/smooth
+        mat = new THREE.MeshPhongMaterial({
+          color: 0xffffff,
+          vertexColors: true,
+          specular: 0x222222,
+          shininess: 40,
+          side: THREE.DoubleSide,
+          flatShading: false,
+        });
+    }
+
+    mat.transparent = opacity < 1;
+    mat.opacity = opacity;
+    mat.wireframe = wireframe;
+    return mat;
+  }
+
+  // --- Solid control event listeners ---
+  const solidIsoCtrl = document.getElementById('solid-iso-ctrl');
+  if (solidIsoCtrl) {
+    solidIsoCtrl.addEventListener('input', () => {
+      document.getElementById('solid-iso-ctrl-val').textContent = solidIsoCtrl.value;
+      // Auto-rebuild with debounce
+      if (solidAutoRebuildTimer) clearTimeout(solidAutoRebuildTimer);
+      solidAutoRebuildTimer = setTimeout(() => {
+        if (currentSolidMode === 'solid' && volume && volumeMeta.rows && renderer) buildSolid();
+      }, 300);
+    });
+  }
+
+  // Opacity
+  const solidOpacity = document.getElementById('solid-opacity');
+  if (solidOpacity) {
+    solidOpacity.addEventListener('input', () => {
+      document.getElementById('solid-opacity-val').textContent = solidOpacity.value;
+      if (solidMesh) {
+        solidMesh.material.opacity = parseFloat(solidOpacity.value);
+        solidMesh.material.transparent = parseFloat(solidOpacity.value) < 1;
+      }
+    });
+  }
+
+  // Wireframe
+  const solidWireframe = document.getElementById('solid-wireframe');
+  if (solidWireframe) {
+    solidWireframe.addEventListener('change', () => {
+      if (solidMesh) solidMesh.material.wireframe = solidWireframe.checked;
+    });
+  }
+
+  // Material preset
+  const solidMaterial = document.getElementById('solid-material');
+  if (solidMaterial) {
+    solidMaterial.addEventListener('change', () => {
+      if (solidMesh) {
+        const oldWireframe = solidMesh.material.wireframe;
+        solidMesh.material.dispose();
+        solidMesh.material = createSolidMaterial();
+        solidMesh.material.wireframe = oldWireframe;
+      }
+    });
+  }
+
+  // Lighting
+  const solidLightCtrl = document.getElementById('solid-light');
+  if (solidLightCtrl) {
+    solidLightCtrl.addEventListener('input', () => {
+      document.getElementById('solid-light-val').textContent = solidLightCtrl.value;
+      if (solidLight1) solidLight1.intensity = parseFloat(solidLightCtrl.value);
+    });
+  }
+
+  function updateSolidGeometry() {
+    if (!solidGeometry) return;
+    let totalVerts = 0;
+    for (const arr of solidPositions) totalVerts += arr.length;
+    const pos = new Float32Array(totalVerts);
+    const norm = new Float32Array(totalVerts);
+    let offset = 0;
+    for (let i = 0; i < solidPositions.length; i++) {
+      pos.set(solidPositions[i], offset);
+      norm.set(solidNormals[i], offset);
+      offset += solidPositions[i].length;
+    }
+
+    // Apply colormap as vertex colors
+    const numVerts = totalVerts / 3;
+    const colors = new Float32Array(totalVerts);
+    const lut = colormaps[currentColormap];
+    let intOffset = 0;
+    for (let i = 0; i < solidIntensities.length; i++) {
+      const intArr = solidIntensities[i];
+      for (let j = 0; j < intArr.length; j++) {
+        const ci = Math.max(0, Math.min(255, Math.round(intArr[j] * 255)));
+        const rgb = lut[ci];
+        const vIdx = (intOffset + j) * 3;
+        colors[vIdx] = rgb[0] / 255;
+        colors[vIdx + 1] = rgb[1] / 255;
+        colors[vIdx + 2] = rgb[2] / 255;
+      }
+      intOffset += intArr.length;
+    }
+
+    solidGeometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    solidGeometry.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
+    solidGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    solidGeometry.computeBoundingSphere();
+  }
+
+  function updateSolidProgress(done, total) {
+    let el = document.getElementById('mc-build-progress');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'mc-build-progress';
+      el.style.cssText = 'position:absolute;top:8px;left:8px;color:#e94560;font-size:0.75em;background:rgba(0,0,0,0.7);padding:2px 8px;border-radius:4px;z-index:10;pointer-events:none;';
+      container.appendChild(el);
+    }
+    if (done < 0) {
+      el.style.display = 'none';
+      return;
+    }
+    const pct = Math.round((done / total) * 100);
+    const triCount = solidPositions.reduce((s, a) => s + a.length / 9, 0);
+    el.style.display = 'block';
+    el.textContent = `Building: ${pct}% — ${Math.round(triCount).toLocaleString()} triangles`;
+  }
 })();
