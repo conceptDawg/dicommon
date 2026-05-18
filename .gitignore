@@ -1,5 +1,18 @@
 node_modules/
 .DS_Store
+
+# Agent / tooling state
+.agenterie/
+
+# Local dev helpers and generated docs
+monitor-server.sh
+restart-server.sh
+CodeReview_*.html
+
+# Server runtime artifacts
+server.log
+server.pid
+
 # DICOM data files (large binary, don't commit)
 1000022B/
 DICOMDIR
