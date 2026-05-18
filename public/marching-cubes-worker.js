@@ -264,50 +264,95 @@ const TRI_TABLE = [
 ];
 
 self.onmessage = function(e) {
-  const { volume, cols, rows, numSlices, isoValue, wc, ww, stepX, stepY, stepZ } = e.data;
-  
-  console.log('[MC Worker] received:', { cols, rows, numSlices, isoValue, wc, ww, volumeLength: volume ? volume.length : 'null', firstSliceType: volume && volume[0] ? volume[0].constructor.name : 'null', firstSliceLength: volume && volume[0] ? volume[0].length : 'null' });
-  
+  const { volumeBuf, cols, rows, numSlices, isoValue, wc, ww, stepX, stepY, stepZ } = e.data;
+  const volume = new Float32Array(volumeBuf);
   const lower = wc - ww / 2;
-  
-  // Get windowed value
-  function getVal(z, y, x) {
-    if (z < 0 || z >= numSlices || y < 0 || y >= rows || x < 0 || x >= cols) return 0;
-    const slice = volume[z];
-    if (!slice) return 0;
-    const raw = slice[y * cols + x];
-    if (raw === undefined) return 0;
-    return Math.max(0, Math.min(1, (raw - lower) / ww));
+  const planeSize = rows * cols;
+  const strideZ = planeSize, strideY = cols;
+  const invWW = 1 / ww;
+
+  // Pre-window into a Float32 normalized field [0..1] (clamped).
+  // This pays one O(N) pass and removes a divide+clamp from every interp/gradient.
+  const norm = new Float32Array(volume.length);
+  for (let i = 0, n = volume.length; i < n; i++) {
+    let v = (volume[i] - lower) * invWW;
+    if (v < 0) v = 0; else if (v > 1) v = 1;
+    norm[i] = v;
   }
-  
-  // Process cubes radiating from center in expanding shells
-  const BATCH_SIZE = 20000; // triangles per batch for smooth progressive display
+
+  // Gradient (central differences) — used as the surface normal at any point.
+  function gradX(z, y, x) {
+    const xm = x > 0 ? x - 1 : x;
+    const xp = x < cols - 1 ? x + 1 : x;
+    return (norm[z * strideZ + y * strideY + xp] - norm[z * strideZ + y * strideY + xm]) * 0.5;
+  }
+  function gradY(z, y, x) {
+    const ym = y > 0 ? y - 1 : y;
+    const yp = y < rows - 1 ? y + 1 : y;
+    return (norm[z * strideZ + yp * strideY + x] - norm[z * strideZ + ym * strideY + x]) * 0.5;
+  }
+  function gradZ(z, y, x) {
+    const zm = z > 0 ? z - 1 : z;
+    const zp = z < numSlices - 1 ? z + 1 : z;
+    return (norm[zp * strideZ + y * strideY + x] - norm[zm * strideZ + y * strideY + x]) * 0.5;
+  }
+
+  // Scratch buffers — declared once, reused per cube.
+  // For each of 12 edges we store: x, y, z, intensity, nx, ny, nz, valid(0/1).
+  const VERT_STRIDE = 8;
+  const vertScratch = new Float32Array(12 * VERT_STRIDE);
+
+  // Helper: interpolate edge `e` from corner A (cax,cay,caz,va,gAx,gAy,gAz) to B.
+  function setVert(eIdx, mu, ax, ay, az, bx, by, bz, va, vb, gax, gay, gaz, gbx, gby, gbz) {
+    const o = eIdx * VERT_STRIDE;
+    const omu = 1 - mu;
+    vertScratch[o] =   ax + mu * (bx - ax);
+    vertScratch[o+1] = ay + mu * (by - ay);
+    vertScratch[o+2] = az + mu * (bz - az);
+    vertScratch[o+3] = va * omu + vb * mu;
+    // gradient interp (will be normalized later when written into output)
+    vertScratch[o+4] = gax * omu + gbx * mu;
+    vertScratch[o+5] = gay * omu + gby * mu;
+    vertScratch[o+6] = gaz * omu + gbz * mu;
+    vertScratch[o+7] = 1;
+  }
+
+  function muForEdge(va, vb) {
+    if (Math.abs(va - vb) < 1e-5) return 0;
+    return (isoValue - va) / (vb - va);
+  }
+
   let positions = [];
   let normals = [];
-  let intensities = []; // per-vertex intensity for colormap
-  let triCount = 0;
+  let intensities = [];
   let cubesDone = 0;
-  
-  // Expand from center using shells of increasing radius
+
   const cxf = (cols - 2) / 2, cyf = (rows - 2) / 2, czf = (numSlices - 2) / 2;
   const maxR = Math.sqrt(cxf*cxf + cyf*cyf + czf*czf) + 1;
   const totalCubes = (cols - 1) * (rows - 1) * (numSlices - 1);
-  const processed = new Uint8Array(totalCubes); // track processed cubes
-  const shellStep = Math.max(1, Math.min(cols, rows, numSlices) / 8); // shell thickness
-  
-  for (let r = 0; r <= maxR; r += shellStep) {
-    const r2max = (r + shellStep) * (r + shellStep);
-    const r2min = r * r;
-    // Iterate cubes within this shell
-    const zLo = Math.max(0, Math.floor(czf - r - shellStep));
-    const zHi = Math.min(numSlices - 2, Math.ceil(czf + r + shellStep));
-    const yLo = Math.max(0, Math.floor(cyf - r - shellStep));
-    const yHi = Math.min(rows - 2, Math.ceil(cyf + r + shellStep));
-    const xLo = Math.max(0, Math.floor(cxf - r - shellStep));
-    const xHi = Math.min(cols - 2, Math.ceil(cxf + r + shellStep));
-    
+  const processed = new Uint8Array(totalCubes);
+  const shellStep = Math.max(1, Math.min(cols, rows, numSlices) / 8);
+
+  for (let R = 0; R <= maxR; R += shellStep) {
+    const r2max = (R + shellStep) * (R + shellStep);
+    const r2min = R * R;
+    const zLo = Math.max(0, Math.floor(czf - R - shellStep));
+    const zHi = Math.min(numSlices - 2, Math.ceil(czf + R + shellStep));
+    const yLo = Math.max(0, Math.floor(cyf - R - shellStep));
+    const yHi = Math.min(rows - 2, Math.ceil(cyf + R + shellStep));
+    const xLo = Math.max(0, Math.floor(cxf - R - shellStep));
+    const xHi = Math.min(cols - 2, Math.ceil(cxf + R + shellStep));
+
     for (let z = zLo; z <= zHi; z++) {
+      const zBase  = z       * strideZ;
+      const zBase1 = (z + 1) * strideZ;
+      const pz  = z * stepZ;
+      const pz1 = (z + 1) * stepZ;
       for (let y = yLo; y <= yHi; y++) {
+        const yOff  = y       * strideY;
+        const yOff1 = (y + 1) * strideY;
+        const py  = y * stepY;
+        const py1 = (y + 1) * stepY;
         for (let x = xLo; x <= xHi; x++) {
           const idx = z * (rows - 1) * (cols - 1) + y * (cols - 1) + x;
           if (processed[idx]) continue;
@@ -316,93 +361,98 @@ self.onmessage = function(e) {
           if (d2 < r2min || d2 >= r2max) continue;
           processed[idx] = 1;
           cubesDone++;
-        // Get 8 corner values
-        const v0 = getVal(z, y, x);
-        const v1 = getVal(z, y, x + 1);
-        const v2 = getVal(z, y + 1, x + 1);
-        const v3 = getVal(z, y + 1, x);
-        const v4 = getVal(z + 1, y, x);
-        const v5 = getVal(z + 1, y, x + 1);
-        const v6 = getVal(z + 1, y + 1, x + 1);
-        const v7 = getVal(z + 1, y + 1, x);
-        
-        // Calculate cube index
-        let cubeIndex = 0;
-        if (v0 > isoValue) cubeIndex |= 1;
-        if (v1 > isoValue) cubeIndex |= 2;
-        if (v2 > isoValue) cubeIndex |= 4;
-        if (v3 > isoValue) cubeIndex |= 8;
-        if (v4 > isoValue) cubeIndex |= 16;
-        if (v5 > isoValue) cubeIndex |= 32;
-        if (v6 > isoValue) cubeIndex |= 64;
-        if (v7 > isoValue) cubeIndex |= 128;
-        
-        if (EDGE_TABLE[cubeIndex] === 0) continue;
-        
-        // Vertex positions for the 8 corners (in volume space)
-        const px = x * stepX, py = y * stepY, pz = z * stepZ;
-        const px1 = (x + 1) * stepX, py1 = (y + 1) * stepY, pz1 = (z + 1) * stepZ;
-        
-        // Interpolate edge vertices
-        const vertList = new Array(12);
-        const edges = EDGE_TABLE[cubeIndex];
-        
-        function interp(va, vb, pa, pb) {
-          let mu;
-          if (Math.abs(isoValue - va) < 0.00001) mu = 0;
-          else if (Math.abs(isoValue - vb) < 0.00001) mu = 1;
-          else if (Math.abs(va - vb) < 0.00001) mu = 0;
-          else mu = (isoValue - va) / (vb - va);
-          return [
-            pa[0] + mu * (pb[0] - pa[0]),
-            pa[1] + mu * (pb[1] - pa[1]),
-            pa[2] + mu * (pb[2] - pa[2]),
-            va + mu * (vb - va) // interpolated intensity (0-1)
-          ];
-        }
-        
-        const c0 = [px, py, pz], c1 = [px1, py, pz], c2 = [px1, py1, pz], c3 = [px, py1, pz];
-        const c4 = [px, py, pz1], c5 = [px1, py, pz1], c6 = [px1, py1, pz1], c7 = [px, py1, pz1];
-        
-        if (edges & 1) vertList[0] = interp(v0, v1, c0, c1);
-        if (edges & 2) vertList[1] = interp(v1, v2, c1, c2);
-        if (edges & 4) vertList[2] = interp(v2, v3, c2, c3);
-        if (edges & 8) vertList[3] = interp(v3, v0, c3, c0);
-        if (edges & 16) vertList[4] = interp(v4, v5, c4, c5);
-        if (edges & 32) vertList[5] = interp(v5, v6, c5, c6);
-        if (edges & 64) vertList[6] = interp(v6, v7, c6, c7);
-        if (edges & 128) vertList[7] = interp(v7, v4, c7, c4);
-        if (edges & 256) vertList[8] = interp(v0, v4, c0, c4);
-        if (edges & 512) vertList[9] = interp(v1, v5, c1, c5);
-        if (edges & 1024) vertList[10] = interp(v2, v6, c2, c6);
-        if (edges & 2048) vertList[11] = interp(v3, v7, c3, c7);
-        
-        // Generate triangles
-        const triRow = TRI_TABLE[cubeIndex];
-        for (let i = 0; i < triRow.length && triRow[i] !== -1; i += 3) {
-          const a = vertList[triRow[i]];
-          const b = vertList[triRow[i + 1]];
-          const c = vertList[triRow[i + 2]];
-          if (!a || !b || !c) continue; // skip degenerate
-          
-          // Calculate face normal
-          const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
-          const wx = c[0] - a[0], wy = c[1] - a[1], wz = c[2] - a[2];
-          const nx = uy * wz - uz * wy;
-          const ny = uz * wx - ux * wz;
-          const nz = ux * wy - uy * wx;
-          const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-          
-          positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-          normals.push(nx/len, ny/len, nz/len, nx/len, ny/len, nz/len, nx/len, ny/len, nz/len);
-          intensities.push(a[3], b[3], c[3]); // per-vertex intensity
-          triCount++;
-        }
+
+          // 8 corner values (already windowed)
+          const v0 = norm[zBase  + yOff  + x];
+          const v1 = norm[zBase  + yOff  + x + 1];
+          const v2 = norm[zBase  + yOff1 + x + 1];
+          const v3 = norm[zBase  + yOff1 + x];
+          const v4 = norm[zBase1 + yOff  + x];
+          const v5 = norm[zBase1 + yOff  + x + 1];
+          const v6 = norm[zBase1 + yOff1 + x + 1];
+          const v7 = norm[zBase1 + yOff1 + x];
+
+          let cubeIndex = 0;
+          if (v0 > isoValue) cubeIndex |= 1;
+          if (v1 > isoValue) cubeIndex |= 2;
+          if (v2 > isoValue) cubeIndex |= 4;
+          if (v3 > isoValue) cubeIndex |= 8;
+          if (v4 > isoValue) cubeIndex |= 16;
+          if (v5 > isoValue) cubeIndex |= 32;
+          if (v6 > isoValue) cubeIndex |= 64;
+          if (v7 > isoValue) cubeIndex |= 128;
+
+          const edges = EDGE_TABLE[cubeIndex];
+          if (edges === 0) continue;
+
+          const px = x * stepX, px1 = (x + 1) * stepX;
+
+          // Compute gradients at the 8 corners on demand (each gradient is 6 fetches).
+          // We always need them when any of the corresponding edges is active.
+          // Branching to skip is dominated by gradient cost anyway, so just compute all 8.
+          const g0x = gradX(z,   y,   x);   const g0y = gradY(z,   y,   x);   const g0z = gradZ(z,   y,   x);
+          const g1x = gradX(z,   y,   x+1); const g1y = gradY(z,   y,   x+1); const g1z = gradZ(z,   y,   x+1);
+          const g2x = gradX(z,   y+1, x+1); const g2y = gradY(z,   y+1, x+1); const g2z = gradZ(z,   y+1, x+1);
+          const g3x = gradX(z,   y+1, x);   const g3y = gradY(z,   y+1, x);   const g3z = gradZ(z,   y+1, x);
+          const g4x = gradX(z+1, y,   x);   const g4y = gradY(z+1, y,   x);   const g4z = gradZ(z+1, y,   x);
+          const g5x = gradX(z+1, y,   x+1); const g5y = gradY(z+1, y,   x+1); const g5z = gradZ(z+1, y,   x+1);
+          const g6x = gradX(z+1, y+1, x+1); const g6y = gradY(z+1, y+1, x+1); const g6z = gradZ(z+1, y+1, x+1);
+          const g7x = gradX(z+1, y+1, x);   const g7y = gradY(z+1, y+1, x);   const g7z = gradZ(z+1, y+1, x);
+
+          // Reset validity flags
+          vertScratch[0*VERT_STRIDE+7] = 0; vertScratch[1*VERT_STRIDE+7] = 0;
+          vertScratch[2*VERT_STRIDE+7] = 0; vertScratch[3*VERT_STRIDE+7] = 0;
+          vertScratch[4*VERT_STRIDE+7] = 0; vertScratch[5*VERT_STRIDE+7] = 0;
+          vertScratch[6*VERT_STRIDE+7] = 0; vertScratch[7*VERT_STRIDE+7] = 0;
+          vertScratch[8*VERT_STRIDE+7] = 0; vertScratch[9*VERT_STRIDE+7] = 0;
+          vertScratch[10*VERT_STRIDE+7] = 0; vertScratch[11*VERT_STRIDE+7] = 0;
+
+          if (edges & 1)    setVert(0,  muForEdge(v0, v1), px,  py,  pz,  px1, py,  pz,  v0, v1, g0x,g0y,g0z, g1x,g1y,g1z);
+          if (edges & 2)    setVert(1,  muForEdge(v1, v2), px1, py,  pz,  px1, py1, pz,  v1, v2, g1x,g1y,g1z, g2x,g2y,g2z);
+          if (edges & 4)    setVert(2,  muForEdge(v2, v3), px1, py1, pz,  px,  py1, pz,  v2, v3, g2x,g2y,g2z, g3x,g3y,g3z);
+          if (edges & 8)    setVert(3,  muForEdge(v3, v0), px,  py1, pz,  px,  py,  pz,  v3, v0, g3x,g3y,g3z, g0x,g0y,g0z);
+          if (edges & 16)   setVert(4,  muForEdge(v4, v5), px,  py,  pz1, px1, py,  pz1, v4, v5, g4x,g4y,g4z, g5x,g5y,g5z);
+          if (edges & 32)   setVert(5,  muForEdge(v5, v6), px1, py,  pz1, px1, py1, pz1, v5, v6, g5x,g5y,g5z, g6x,g6y,g6z);
+          if (edges & 64)   setVert(6,  muForEdge(v6, v7), px1, py1, pz1, px,  py1, pz1, v6, v7, g6x,g6y,g6z, g7x,g7y,g7z);
+          if (edges & 128)  setVert(7,  muForEdge(v7, v4), px,  py1, pz1, px,  py,  pz1, v7, v4, g7x,g7y,g7z, g4x,g4y,g4z);
+          if (edges & 256)  setVert(8,  muForEdge(v0, v4), px,  py,  pz,  px,  py,  pz1, v0, v4, g0x,g0y,g0z, g4x,g4y,g4z);
+          if (edges & 512)  setVert(9,  muForEdge(v1, v5), px1, py,  pz,  px1, py,  pz1, v1, v5, g1x,g1y,g1z, g5x,g5y,g5z);
+          if (edges & 1024) setVert(10, muForEdge(v2, v6), px1, py1, pz,  px1, py1, pz1, v2, v6, g2x,g2y,g2z, g6x,g6y,g6z);
+          if (edges & 2048) setVert(11, muForEdge(v3, v7), px,  py1, pz,  px,  py1, pz1, v3, v7, g3x,g3y,g3z, g7x,g7y,g7z);
+
+          const triRow = TRI_TABLE[cubeIndex];
+          for (let i = 0; i < triRow.length && triRow[i] !== -1; i += 3) {
+            const aIdx = triRow[i]     * VERT_STRIDE;
+            const bIdx = triRow[i + 1] * VERT_STRIDE;
+            const cIdx = triRow[i + 2] * VERT_STRIDE;
+            if (!vertScratch[aIdx+7] || !vertScratch[bIdx+7] || !vertScratch[cIdx+7]) continue;
+
+            // Positions
+            const ax = vertScratch[aIdx],   ay = vertScratch[aIdx+1], az = vertScratch[aIdx+2];
+            const bx = vertScratch[bIdx],   by = vertScratch[bIdx+1], bz = vertScratch[bIdx+2];
+            const cx = vertScratch[cIdx],   cy = vertScratch[cIdx+1], cz = vertScratch[cIdx+2];
+            positions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+
+            // Per-vertex gradient normals (point along increasing intensity — flip so they point outward)
+            // The scalar field increases inside the iso-surface; gradient points inward → negate.
+            let an_x = -vertScratch[aIdx+4], an_y = -vertScratch[aIdx+5], an_z = -vertScratch[aIdx+6];
+            let bn_x = -vertScratch[bIdx+4], bn_y = -vertScratch[bIdx+5], bn_z = -vertScratch[bIdx+6];
+            let cn_x = -vertScratch[cIdx+4], cn_y = -vertScratch[cIdx+5], cn_z = -vertScratch[cIdx+6];
+            let aL = Math.sqrt(an_x*an_x + an_y*an_y + an_z*an_z); if (aL < 1e-8) aL = 1;
+            let bL = Math.sqrt(bn_x*bn_x + bn_y*bn_y + bn_z*bn_z); if (bL < 1e-8) bL = 1;
+            let cL = Math.sqrt(cn_x*cn_x + cn_y*cn_y + cn_z*cn_z); if (cL < 1e-8) cL = 1;
+            normals.push(
+              an_x/aL, an_y/aL, an_z/aL,
+              bn_x/bL, bn_y/bL, bn_z/bL,
+              cn_x/cL, cn_y/cL, cn_z/cL
+            );
+
+            intensities.push(vertScratch[aIdx+3], vertScratch[bIdx+3], vertScratch[cIdx+3]);
+          }
         }
       }
     }
-    
-    // Post batch after each shell
+
     if (positions.length > 0) {
       const posArr = new Float32Array(positions);
       const normArr = new Float32Array(normals);
@@ -418,9 +468,8 @@ self.onmessage = function(e) {
       positions = [];
       normals = [];
       intensities = [];
-      triCount = 0;
     }
   }
-  
+
   self.postMessage({ type: 'done' });
 };

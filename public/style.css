@@ -66,6 +66,9 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
 .series-item:hover { background: #0f3460; }
 .series-item.active { background: #e94560; color: #fff; }
 .series-item .count { color: #666; font-size: 0.8em; }
+.series-item.unsupported { opacity: 0.55; }
+.series-item.unsupported.active { opacity: 0.9; }
+.series-badge { color: #ffc66d; margin-left: 4px; font-size: 0.9em; }
 
 #metadata-panel { margin-top: 16px; }
 #metadata-content { font-size: 0.78em; line-height: 1.6; color: #999; }
@@ -75,6 +78,30 @@ header h1 { font-size: 1.2em; color: #e94560; white-space: nowrap; }
 .collapsible:hover { color: #fff; }
 .collapse-arrow { font-size: 0.7em; transition: transform 0.2s; }
 .collapsible:not(.collapsed) .collapse-arrow { transform: rotate(90deg); }
+
+#folder-loader { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+#folder-loader #folder-btn {
+  padding: 6px 10px;
+  background: #0f3460;
+  border: 1px solid #2a3a5a;
+  color: #cde;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.82em;
+}
+#folder-loader #folder-btn:hover { background: #16407a; }
+#folder-loader #folder-status { font-size: 0.75em; color: #7a8696; }
+
+#overlay-section { margin-top: 16px; }
+#overlay-section h2 { font-size: 0.9em; color: #e94560; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+#overlay-section select, #overlay-section input[type="range"] { width: 100%; font-size: 0.85em; }
+#overlay-section label { display: block; font-size: 0.8em; color: #aaa; margin-top: 6px; }
+#overlay-section #overlay-clear {
+  width: 100%; margin-top: 8px; padding: 4px 8px;
+  background: #2a2a2a; border: 1px solid #444; color: #ccc;
+  border-radius: 4px; cursor: pointer; font-size: 0.8em;
+}
+#overlay-section #overlay-clear:hover { background: #3a3a3a; }
 
 #bookmarks-section { margin-top: 16px; }
 #bookmarks-section h2 { font-size: 0.9em; color: #e94560; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }

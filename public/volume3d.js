@@ -4,6 +4,7 @@
   let volumeTexture, colormapTexture;
   let isInitialized = false;
   let animFrameId = null;
+  let dirty = true; // render-on-dirty
   let slicePlanes = { axial: null, sagittal: null, coronal: null };
   let sliceHandles = []; // interactive drag handles
   let clipPlaneObjects = []; // 6 clip planes with handles
@@ -11,8 +12,12 @@
   let volSize = null; // stored for slice plane positioning
   const raycaster = new THREE.Raycaster();
   const mouse = new THREE.Vector2();
-  let dragHandle = null; // { handle, axis, plane }
-  let dragPlane = null; // THREE.Plane for constraining drag
+  let dragHandle = null;
+  let dragPlane = null;
+  let _orbit = null; // populated by setupControls
+
+  function invalidate() { dirty = true; }
+  window._invalidate3D = invalidate;
 
   const container = document.getElementById('volume3d-container');
   const canvas3d = document.getElementById('volume3d-canvas');
@@ -56,6 +61,7 @@
     uniform sampler2D colormapTex;
     uniform float threshold;
     uniform float opacityScale;
+    uniform float gain;
     uniform int numSteps;
     uniform vec3 volumeSize;
     uniform vec3 clipMin;
@@ -106,6 +112,7 @@
         }
 
         float intensity = texture(volumeTex, texCoord).r;
+        intensity = clamp(intensity * gain, 0.0, 1.0);
 
         if (mipMode) {
           // Maximum Intensity Projection: track max intensity along ray
@@ -157,11 +164,106 @@
       colormapTexture.magFilter = THREE.LinearFilter;
       colormapTexture.needsUpdate = true;
     }
+    invalidate();
     return colormapTexture;
   }
 
   let upsampledNumSlices = 0;
   let upsampledSliceThickness = 0;
+
+  // --- Module-level volume-rebuild state (hoisted so listeners are attached once) ---
+  let volumeWorker = null;
+  let workerBusy = false;
+  let pendingRebuild = false;
+  let currentDims = null; // { cols, rows, numSlices, upsampledNumSlices, upsampleFactor }
+  let rebuildTimer = null;
+
+  function applyVolumeTexture(texData) {
+    if (!currentDims) return;
+    const { cols, rows, upsampledNumSlices } = currentDims;
+    if (volumeTexture) { volumeTexture.dispose(); volumeTexture = null; }
+    volumeTexture = new THREE.Data3DTexture(texData, cols, rows, upsampledNumSlices);
+    volumeTexture.format = THREE.RedFormat;
+    volumeTexture.type = THREE.UnsignedByteType;
+    volumeTexture.minFilter = THREE.LinearFilter;
+    volumeTexture.magFilter = THREE.LinearFilter;
+    volumeTexture.unpackAlignment = 1;
+    volumeTexture.needsUpdate = true;
+    if (mesh) mesh.material.uniforms.volumeTex.value = volumeTexture;
+    invalidate();
+  }
+
+  function rebuildVolumeTexture() {
+    if (!currentDims || !volume) return;
+    const panel3d = document.getElementById('volume3d-panel');
+    if (panel3d && getComputedStyle(panel3d).display === 'none') return;
+
+    const { cols, rows, numSlices, upsampledNumSlices, upsampleFactor } = currentDims;
+    const wc = parseInt(document.getElementById('wc-slider').value);
+    const ww = parseInt(document.getElementById('ww-slider').value);
+
+    if (volumeWorker) {
+      if (workerBusy) { pendingRebuild = true; return; }
+      workerBusy = true;
+      // volume is a Float32Array — send a view over its buffer (no copy on transfer)
+      // But we still need it on main thread, so structured-clone send a fresh copy.
+      const sliceCount = numSlices;
+      const planeSize = rows * cols;
+      const buf = volume.buffer.slice(volume.byteOffset, volume.byteOffset + sliceCount * planeSize * 4);
+      volumeWorker.postMessage({
+        volumeBuf: buf,
+        cols, rows, numSlices, upsampledNumSlices, upsampleFactor, wc, ww
+      }, [buf]);
+      return;
+    }
+
+    // Sync fallback
+    const lower = wc - ww / 2;
+    const planeSize = rows * cols;
+    const texData = new Uint8Array(cols * rows * upsampledNumSlices);
+    for (let uz = 0; uz < upsampledNumSlices; uz++) {
+      const origPos = uz / upsampleFactor;
+      const s0 = Math.floor(origPos);
+      const s1 = Math.min(s0 + 1, numSlices - 1);
+      const frac = origPos - s0;
+      const oneMinusFrac = 1 - frac;
+      const base0 = s0 * planeSize;
+      const base1 = s1 * planeSize;
+      const dstBase = uz * planeSize;
+      for (let i = 0; i < planeSize; i++) {
+        const val = volume[base0 + i] * oneMinusFrac + volume[base1 + i] * frac;
+        let n = ((val - lower) / ww) * 255;
+        if (n < 0) n = 0; else if (n > 255) n = 255;
+        texData[dstBase + i] = n;
+      }
+    }
+    applyVolumeTexture(texData);
+  }
+
+  function debouncedRebuild() {
+    if (rebuildTimer) clearTimeout(rebuildTimer);
+    rebuildTimer = setTimeout(rebuildVolumeTexture, 100);
+  }
+
+  // Spawn worker once
+  try {
+    volumeWorker = new Worker('volume-worker.js');
+    volumeWorker.onmessage = function(e) {
+      const { texData } = e.data;
+      applyVolumeTexture(new Uint8Array(texData));
+      workerBusy = false;
+      if (pendingRebuild) { pendingRebuild = false; rebuildVolumeTexture(); }
+    };
+  } catch (err) {
+    console.warn('Volume worker unavailable, falling back to sync rebuild', err);
+  }
+
+  // Attach W/L + preset listeners ONCE at module load
+  document.getElementById('wc-slider').addEventListener('input', debouncedRebuild);
+  document.getElementById('ww-slider').addEventListener('input', debouncedRebuild);
+  document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => setTimeout(rebuildVolumeTexture, 10));
+  });
 
   function initVolume3D() {
     if (!volume || !volumeMeta.rows) return;
@@ -187,104 +289,9 @@
       setupControls();
     }
 
-    // Flatten volume for Web Worker (once per series load)
-    const flatVolume = [];
-    for (let s = 0; s < numSlices; s++) {
-      const flat = new Float32Array(rows * cols);
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-          flat[y * cols + x] = volume[s][y][x];
-        }
-      }
-      flatVolume.push(flat);
-    }
-
-    // Web Worker for off-thread texture rebuild
-    let volumeWorker = null;
-    let workerBusy = false;
-    let pendingRebuild = false;
-    try {
-      volumeWorker = new Worker('volume-worker.js');
-      volumeWorker.onmessage = function(e) {
-        const { texData } = e.data;
-        applyVolumeTexture(new Uint8Array(texData));
-        workerBusy = false;
-        if (pendingRebuild) {
-          pendingRebuild = false;
-          rebuildVolumeTexture();
-        }
-      };
-    } catch(err) {
-      console.warn('Web Worker not available, falling back to sync rebuild', err);
-    }
-
     // Build 3D texture from volume data with Z interpolation
+    currentDims = { cols, rows, numSlices, upsampledNumSlices, upsampleFactor };
     rebuildVolumeTexture();
-
-    function rebuildVolumeTexture() {
-      // Skip if 3D panel is hidden (e.g. 3+1 layout)
-      const panel3d = document.getElementById('volume3d-panel');
-      if (panel3d && getComputedStyle(panel3d).display === 'none') return;
-
-      const wc = parseInt(document.getElementById('wc-slider').value);
-      const ww = parseInt(document.getElementById('ww-slider').value);
-
-      if (volumeWorker) {
-        if (workerBusy) { pendingRebuild = true; return; }
-        workerBusy = true;
-        volumeWorker.postMessage({
-          volume: flatVolume,
-          cols, rows, numSlices, upsampledNumSlices, upsampleFactor, wc, ww
-        });
-        return;
-      }
-
-      // Fallback: synchronous rebuild
-      const lower = wc - ww / 2;
-      const texData = new Uint8Array(cols * rows * upsampledNumSlices);
-      for (let uz = 0; uz < upsampledNumSlices; uz++) {
-        const origPos = uz / upsampleFactor;
-        const s0 = Math.floor(origPos);
-        const s1 = Math.min(s0 + 1, numSlices - 1);
-        const frac = origPos - s0;
-        const oneMinusFrac = 1 - frac;
-        for (let y = 0; y < rows; y++) {
-          for (let x = 0; x < cols; x++) {
-            const val = volume[s0][y][x] * oneMinusFrac + volume[s1][y][x] * frac;
-            const norm = Math.max(0, Math.min(255, ((val - lower) / ww) * 255));
-            texData[uz * rows * cols + y * cols + x] = norm;
-          }
-        }
-      }
-      applyVolumeTexture(texData);
-    }
-
-    function applyVolumeTexture(texData) {
-      if (volumeTexture) { volumeTexture.dispose(); volumeTexture = null; }
-      volumeTexture = new THREE.Data3DTexture(texData, cols, rows, upsampledNumSlices);
-      volumeTexture.format = THREE.RedFormat;
-      volumeTexture.type = THREE.UnsignedByteType;
-      volumeTexture.minFilter = THREE.LinearFilter;
-      volumeTexture.magFilter = THREE.LinearFilter;
-      volumeTexture.unpackAlignment = 1;
-      volumeTexture.needsUpdate = true;
-      if (mesh) { mesh.material.uniforms.volumeTex.value = volumeTexture; }
-    }
-
-    // Debounced rebuild — offloaded to worker but still debounce rapid changes
-    let rebuildTimer = null;
-    function debouncedRebuild() {
-      if (rebuildTimer) clearTimeout(rebuildTimer);
-      rebuildTimer = setTimeout(rebuildVolumeTexture, 100);
-    }
-
-    // Listen for window/level changes to update 3D texture
-    document.getElementById('wc-slider').addEventListener('input', debouncedRebuild);
-    document.getElementById('ww-slider').addEventListener('input', debouncedRebuild);
-    // Also catch preset button clicks
-    document.querySelectorAll('.preset-btn').forEach(btn => {
-      btn.addEventListener('click', () => setTimeout(rebuildVolumeTexture, 10));
-    });
 
     buildColormapTexture();
 
@@ -305,6 +312,7 @@
         colormapTex: { value: colormapTexture },
         threshold: { value: parseFloat(thresholdSlider.value) },
         opacityScale: { value: parseFloat(opacitySlider.value) },
+        gain: { value: parseFloat(document.getElementById('vol-gain').value) },
         numSteps: { value: parseInt(stepsSlider.value) },
         volumeSize: { value: volSize },
         clipMin: { value: new THREE.Vector3(0, 0, 0) },
@@ -345,6 +353,42 @@
     let isDragging = false;
     let isPanning = false;
     let prevX, prevY;
+
+    // Free quaternion orbit: camera's orientation is one quaternion that we
+    // post-multiply with camera-local rotations on each drag. No poles, no
+    // clamps, no derived "up" — the up vector rotates with the view.
+    const target = new THREE.Vector3(0, 0, 0);
+    const qOrbit = new THREE.Quaternion();   // identity = camera looks toward -Z, up=+Y
+    let radius = 2.5;
+    const _offset = new THREE.Vector3();
+    const _localUp = new THREE.Vector3();
+    const _qYaw = new THREE.Quaternion();
+    const _qPitch = new THREE.Quaternion();
+    const _AXIS_Y = new THREE.Vector3(0, 1, 0);
+    const _AXIS_X = new THREE.Vector3(1, 0, 0);
+
+    function applyOrbit() {
+      _offset.set(0, 0, radius).applyQuaternion(qOrbit);
+      camera.position.copy(target).add(_offset);
+      _localUp.copy(_AXIS_Y).applyQuaternion(qOrbit);
+      camera.up.copy(_localUp);
+      camera.lookAt(target);
+    }
+    applyOrbit();
+
+    // Expose for reset/bookmark paths
+    _orbit = {
+      target,
+      get q() { return qOrbit; },
+      get radius() { return radius; },
+      set: (q, r, tgt) => { if (q) qOrbit.copy(q); radius = r; if (tgt) target.copy(tgt); applyOrbit(); invalidate(); },
+      rotate: (dx, dy) => {
+        _qYaw.setFromAxisAngle(_AXIS_Y, -dx);
+        _qPitch.setFromAxisAngle(_AXIS_X, -dy);
+        qOrbit.multiply(_qYaw).multiply(_qPitch);
+        applyOrbit();
+      }
+    };
 
     function getMouseNDC(e) {
       const rect = canvas3d.getBoundingClientRect();
@@ -437,13 +481,20 @@
       prevY = e.clientY;
 
       if (isPanning) {
-        camera.position.x -= dx * 0.005;
-        camera.position.y += dy * 0.005;
+        // Pan in the camera's screen plane: shift target and camera together.
+        const panRight = new THREE.Vector3();
+        const panUp = new THREE.Vector3();
+        camera.matrixWorld.extractBasis(panRight, panUp, new THREE.Vector3());
+        const ks = radius * 0.0025;
+        const delta = panRight.multiplyScalar(-dx * ks).add(panUp.multiplyScalar(dy * ks));
+        target.add(delta);
+        applyOrbit();
       } else {
-        // Rotate mesh
-        mesh.rotation.y += dx * 0.01;
-        mesh.rotation.x += dy * 0.01;
+        // Free orbit: rotate around camera-local axes. Drag-right spins the model
+        // right (camera orbits left); drag-down tilts to look down at the top.
+        _orbit.rotate(dx * 0.01, dy * 0.01);
       }
+      invalidate();
     });
 
     window.addEventListener('mouseup', () => {
@@ -458,18 +509,21 @@
 
     canvas3d.addEventListener('wheel', e => {
       e.preventDefault();
-      camera.position.z = Math.max(0.5, Math.min(10, camera.position.z + e.deltaY * 0.003));
+      radius = Math.max(0.5, Math.min(10, radius + e.deltaY * 0.003));
+      applyOrbit();
+      invalidate();
     });
   }
 
   function resize() {
     if (!renderer) return;
     const w = container.clientWidth;
-    const h = container.clientHeight - 40; // leave room for controls
+    const h = container.clientHeight - 40;
     if (w <= 0 || h <= 0) return;
     renderer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    invalidate();
   }
 
   window._resize3D = resize;
@@ -497,7 +551,8 @@
     if (animFrameId) return;
     function loop() {
       animFrameId = requestAnimationFrame(loop);
-      // Update inverse model matrix so raycasting works in object space
+      if (!dirty) return; // render-on-dirty
+      dirty = false;
       if (mesh) {
         mesh.updateMatrixWorld();
         mesh.material.uniforms.volumeInverseModel.value.copy(mesh.matrixWorld).invert();
@@ -514,20 +569,28 @@
     }
   }
 
-  // Slider events
+  // Slider events (attached once at module load — module IIFE)
   thresholdSlider.addEventListener('input', () => {
     document.getElementById('vol-threshold-val').textContent = thresholdSlider.value;
     if (mesh) mesh.material.uniforms.threshold.value = parseFloat(thresholdSlider.value);
+    invalidate();
   });
-
   opacitySlider.addEventListener('input', () => {
     document.getElementById('vol-opacity-val').textContent = opacitySlider.value;
     if (mesh) mesh.material.uniforms.opacityScale.value = parseFloat(opacitySlider.value);
+    invalidate();
   });
-
+  const gainSlider = document.getElementById('vol-gain');
+  gainSlider.addEventListener('input', () => {
+    const g = parseFloat(gainSlider.value);
+    document.getElementById('vol-gain-val').textContent = g.toFixed(2);
+    if (mesh) mesh.material.uniforms.gain.value = g;
+    invalidate();
+  });
   stepsSlider.addEventListener('input', () => {
     document.getElementById('vol-steps-val').textContent = stepsSlider.value;
     if (mesh) mesh.material.uniforms.numSteps.value = parseInt(stepsSlider.value);
+    invalidate();
   });
 
   // --- Interactive Clip Planes ---
@@ -663,6 +726,7 @@
       mesh.material.uniforms.clipMin.value.set(clipValues.xMin, clipValues.yMin, clipValues.zMin);
       mesh.material.uniforms.clipMax.value.set(clipValues.xMax, clipValues.yMax, clipValues.zMax);
     }
+    invalidate();
   }
 
   function setClipPlanesVisible(show) {
@@ -670,6 +734,7 @@
       p.visible = show;
       if (p._handles) p._handles.forEach(h => h.visible = show);
     });
+    invalidate();
   }
 
   document.getElementById('show-clip-planes').addEventListener('change', (e) => {
@@ -697,12 +762,12 @@
   document.getElementById('mip-checkbox').addEventListener('change', (e) => {
     if (mesh) {
       mesh.material.uniforms.mipMode.value = e.target.checked;
-      // Sync slab value when MIP is toggled on
       if (e.target.checked) {
         const slabEl = document.getElementById('mip-slab');
         const frac = parseInt(slabEl.value) / parseInt(slabEl.max || 1);
         mesh.material.uniforms.mipSlabFrac.value = Math.min(1.0, frac);
       }
+      invalidate();
     }
   });
 
@@ -711,6 +776,7 @@
     const slabEl = document.getElementById('mip-slab');
     const frac = parseInt(slabEl.value) / parseInt(slabEl.max || 1);
     mesh.material.uniforms.mipSlabFrac.value = Math.min(1.0, frac);
+    invalidate();
   });
 
   // Re-init when volume changes (hook into loadVolume)
@@ -851,6 +917,7 @@
       slicePlanes.coronal._handles[0].position.set(0, corY, volSize.z * 0.5);
       slicePlanes.coronal._handles[1].position.set(0, corY, -volSize.z * 0.5);
     }
+    invalidate();
   }
 
   // Listen for slider changes to update plane positions
@@ -904,6 +971,16 @@
   window._get3DState = function() {
     if (!camera || !mesh) return null;
     return {
+      // Orbit state (quaternion-based)
+      orbitQX: _orbit ? _orbit.q.x : 0,
+      orbitQY: _orbit ? _orbit.q.y : 0,
+      orbitQZ: _orbit ? _orbit.q.z : 0,
+      orbitQW: _orbit ? _orbit.q.w : 1,
+      orbitRadius: _orbit ? _orbit.radius : 2.5,
+      orbitTargetX: _orbit ? _orbit.target.x : 0,
+      orbitTargetY: _orbit ? _orbit.target.y : 0,
+      orbitTargetZ: _orbit ? _orbit.target.z : 0,
+      // Legacy camera/rotation for old bookmarks
       cameraX: camera.position.x, cameraY: camera.position.y, cameraZ: camera.position.z,
       rotX: mesh.rotation.x, rotY: mesh.rotation.y, rotZ: mesh.rotation.z,
       threshold: parseFloat(thresholdSlider.value),
@@ -919,7 +996,7 @@
   window._set3DState = function(s) {
     if (!s) {
       // Reset to defaults
-      if (camera) camera.position.set(0, 0, 2.5);
+      if (_orbit) _orbit.set(new THREE.Quaternion(), 2.5, new THREE.Vector3(0, 0, 0));
       if (mesh) mesh.rotation.set(0, 0, 0);
       thresholdSlider.value = 0; document.getElementById('vol-threshold-val').textContent = '0';
       opacitySlider.value = 5; document.getElementById('vol-opacity-val').textContent = '5';
@@ -934,8 +1011,18 @@
       buildColormapTexture();
       return;
     }
-    if (camera) { camera.position.set(s.cameraX, s.cameraY, s.cameraZ); }
-    if (mesh) { mesh.rotation.set(s.rotX, s.rotY, s.rotZ); }
+    if (_orbit && s.orbitQW !== undefined) {
+      _orbit.set(
+        new THREE.Quaternion(s.orbitQX || 0, s.orbitQY || 0, s.orbitQZ || 0, s.orbitQW),
+        s.orbitRadius != null ? s.orbitRadius : 2.5,
+        new THREE.Vector3(s.orbitTargetX || 0, s.orbitTargetY || 0, s.orbitTargetZ || 0)
+      );
+    } else {
+      // Legacy bookmark: reset to default orbit; preserve camera distance if recoverable
+      const r = s.cameraZ ? Math.hypot(s.cameraX || 0, s.cameraY || 0, s.cameraZ) : 2.5;
+      if (_orbit) _orbit.set(new THREE.Quaternion(), r, new THREE.Vector3(0, 0, 0));
+      if (mesh) mesh.rotation.set(s.rotX || 0, s.rotY || 0, s.rotZ || 0);
+    }
 
     thresholdSlider.value = s.threshold;
     document.getElementById('vol-threshold-val').textContent = s.threshold;
@@ -995,11 +1082,9 @@
     modeSelect.addEventListener('change', () => {
       currentSolidMode = modeSelect.value;
       if (currentSolidMode === 'solid') {
-        // Show solid controls, hide volume controls
         if (solidControlsHeader) solidControlsHeader.style.display = 'inline';
         if (volumeControlsBar) volumeControlsBar.style.display = 'none';
         if (solidControlsBar) solidControlsBar.style.display = 'flex';
-        // Hide raycaster, show solid — auto-build if no mesh yet
         if (mesh) mesh.material.visible = false;
         if (solidMesh) {
           solidMesh.visible = true;
@@ -1007,14 +1092,13 @@
           buildSolid();
         }
       } else {
-        // Show volume controls, hide solid controls
         if (solidControlsHeader) solidControlsHeader.style.display = 'none';
         if (volumeControlsBar) volumeControlsBar.style.display = 'flex';
         if (solidControlsBar) solidControlsBar.style.display = 'none';
-        // Show raycaster, hide solid
         if (mesh) mesh.material.visible = true;
         if (solidMesh) solidMesh.visible = false;
       }
+      invalidate();
     });
   }
 
@@ -1040,17 +1124,9 @@
     solidNormals = [];
     solidIntensities = [];
 
-    // Flatten volume for worker
-    const flatVol = [];
-    for (let s = 0; s < numSlices; s++) {
-      const flat = new Float32Array(rows * cols);
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-          flat[y * cols + x] = volume[s][y][x];
-        }
-      }
-      flatVol.push(flat);
-    }
+    // Volume is already a flat Float32Array — transfer a copy of its buffer
+    const planeSize = rows * cols;
+    const volBuf = volume.buffer.slice(volume.byteOffset, volume.byteOffset + numSlices * planeSize * 4);
 
     const wc = parseInt(document.getElementById('wc-slider').value);
     const ww = parseInt(document.getElementById('ww-slider').value);
@@ -1108,11 +1184,11 @@
     };
 
     solidWorker.postMessage({
-      volume: flatVol,
+      volumeBuf: volBuf,
       cols, rows, numSlices,
       isoValue, wc, ww,
       stepX, stepY, stepZ
-    });
+    }, [volBuf]);
 
     if (generateBtn) generateBtn.textContent = 'Building...';
   }
@@ -1190,7 +1266,6 @@
     });
   }
 
-  // Opacity
   const solidOpacity = document.getElementById('solid-opacity');
   if (solidOpacity) {
     solidOpacity.addEventListener('input', () => {
@@ -1199,18 +1274,18 @@
         solidMesh.material.opacity = parseFloat(solidOpacity.value);
         solidMesh.material.transparent = parseFloat(solidOpacity.value) < 1;
       }
+      invalidate();
     });
   }
 
-  // Wireframe
   const solidWireframe = document.getElementById('solid-wireframe');
   if (solidWireframe) {
     solidWireframe.addEventListener('change', () => {
       if (solidMesh) solidMesh.material.wireframe = solidWireframe.checked;
+      invalidate();
     });
   }
 
-  // Material preset
   const solidMaterial = document.getElementById('solid-material');
   if (solidMaterial) {
     solidMaterial.addEventListener('change', () => {
@@ -1220,15 +1295,16 @@
         solidMesh.material = createSolidMaterial();
         solidMesh.material.wireframe = oldWireframe;
       }
+      invalidate();
     });
   }
 
-  // Lighting
   const solidLightCtrl = document.getElementById('solid-light');
   if (solidLightCtrl) {
     solidLightCtrl.addEventListener('input', () => {
       document.getElementById('solid-light-val').textContent = solidLightCtrl.value;
       if (solidLight1) solidLight1.intensity = parseFloat(solidLightCtrl.value);
+      invalidate();
     });
   }
 
@@ -1267,6 +1343,7 @@
     solidGeometry.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
     solidGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     solidGeometry.computeBoundingSphere();
+    invalidate();
   }
 
   function updateSolidProgress(done, total) {

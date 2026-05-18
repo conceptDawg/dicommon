@@ -20,7 +20,31 @@
   <div id="app">
     <aside id="sidebar">
       <h2>Series</h2>
+      <div id="folder-loader">
+        <input type="file" id="folder-input" webkitdirectory directory multiple hidden>
+        <button id="folder-btn" title="Load DICOM files from a folder on this computer">📁 Load Folder…</button>
+        <span id="folder-status"></span>
+      </div>
       <div id="series-list"></div>
+      <div id="overlay-section">
+        <h2>Overlay</h2>
+        <select id="overlay-select"><option value="">— none —</option></select>
+        <div id="overlay-controls" style="display:none">
+          <label>Opacity: <input type="range" id="overlay-opacity" min="0" max="1" step="0.05" value="0.5"> <span id="overlay-opacity-val">0.50</span></label>
+          <label>Colormap: <select id="overlay-colormap">
+            <option value="hot">Hot</option>
+            <option value="cool">Cool</option>
+            <option value="jet" selected>Jet</option>
+            <option value="viridis">Viridis</option>
+            <option value="inferno">Inferno</option>
+            <option value="bone">Bone</option>
+            <option value="grayscale">Grayscale</option>
+          </select></label>
+          <label>Center: <input type="range" id="overlay-wc" min="-1000" max="4000" value="400"> <span id="overlay-wc-val">400</span></label>
+          <label>Width: <input type="range" id="overlay-ww" min="1" max="4000" value="800"> <span id="overlay-ww-val">800</span></label>
+          <button id="overlay-clear">Clear Overlay</button>
+        </div>
+      </div>
       <div id="metadata-panel">
         <h2 class="collapsible collapsed" id="metadata-toggle">Metadata <span class="collapse-arrow">▶</span></h2>
         <div id="metadata-content" style="display:none"></div>
@@ -74,6 +98,7 @@
                 <label>Threshold: <input type="range" id="vol-threshold" min="0" max="1" step="0.01" value="0"> <span id="vol-threshold-val">0</span></label>
                 <label>Opacity: <input type="range" id="vol-opacity" min="0.1" max="10" step="0.1" value="5"> <span id="vol-opacity-val">5</span></label>
                 <label>Steps: <input type="range" id="vol-steps" min="64" max="512" step="16" value="256"> <span id="vol-steps-val">256</span></label>
+                <label title="Multiplies sampled intensity — bright voxels gain more in absolute terms than dark ones">Gain: <input type="range" id="vol-gain" min="0.5" max="5" step="0.05" value="1"> <span id="vol-gain-val">1.0</span></label>
               </div>
               <div class="vol-controls-mid">
                 <label class="crosshair-3d-toggle" style="display:none"><input type="checkbox" id="show-slice-planes"> Crosshairs</label>
@@ -129,8 +154,11 @@
           <option value="inferno">Inferno</option>
         </select></label>
         <label class="mip-toggle"><input type="checkbox" id="mip-checkbox"> MIP</label>
-        <label>Slab: <input type="range" id="mip-slab" min="1" max="22" value="5" disabled> <span id="mip-slab-val">5</span></label>
+        <label>Slab (mm): <input type="range" id="mip-slab" min="1" max="80" value="10" disabled> <span id="mip-slab-val">10</span></label>
         <label class="crosshair-toggle"><input type="checkbox" id="crosshair-checkbox"> Crosshairs</label>
+        <label id="timepoint-control" style="display:none" title="Select timepoint for 4D acquisitions (perfusion, diffusion)">Time: <input type="range" id="timepoint-slider" min="0" max="0" value="0"> <span id="timepoint-val">1/1</span></label>
+        <label class="upsample-toggle" title="Render 2D views at 2× resolution with bilinear interpolation"><input type="checkbox" id="upsample-checkbox"> 2× Upsample</label>
+        <label class="sharpen-ctrl" title="3×3 unsharp mask on the upsampled intensity grid">Sharpen: <input type="range" id="sharpen-slider" min="0" max="0.2" step="0.001" value="0.1"> <span id="sharpen-val">0.100</span></label>
       </div>
       <div id="histogram-panel">
         <canvas id="histogram-canvas"></canvas>
@@ -150,6 +178,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dicom-parser@1.8.21/dist/dicomParser.min.js"></script>
   <script src="marching-cubes.js"></script>
   <script src="app.js"></script>
   <script src="volume3d.js"></script>

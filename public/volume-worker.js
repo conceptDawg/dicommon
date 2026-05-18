@@ -1,7 +1,10 @@
-// Web Worker for volume texture rebuild (off main thread)
+// Web Worker for volume texture rebuild (off main thread).
+// Receives a flat Float32Array buffer + dims; produces an upsampled, windowed Uint8 3D texture.
 self.onmessage = function(e) {
-  const { volume, cols, rows, numSlices, upsampledNumSlices, upsampleFactor, wc, ww } = e.data;
+  const { volumeBuf, cols, rows, numSlices, upsampledNumSlices, upsampleFactor, wc, ww } = e.data;
+  const volume = new Float32Array(volumeBuf);
   const lower = wc - ww / 2;
+  const planeSize = rows * cols;
   const texData = new Uint8Array(cols * rows * upsampledNumSlices);
 
   for (let uz = 0; uz < upsampledNumSlices; uz++) {
@@ -10,19 +13,14 @@ self.onmessage = function(e) {
     const s1 = Math.min(s0 + 1, numSlices - 1);
     const frac = origPos - s0;
     const oneMinusFrac = 1 - frac;
-
-    const slice0 = volume[s0];
-    const slice1 = volume[s1];
-    const offset = uz * rows * cols;
-
-    for (let y = 0; y < rows; y++) {
-      const rowOffset = offset + y * cols;
-      const srcOffset = y * cols;
-      for (let x = 0; x < cols; x++) {
-        const val = slice0[srcOffset + x] * oneMinusFrac + slice1[srcOffset + x] * frac;
-        const norm = Math.max(0, Math.min(255, ((val - lower) / ww) * 255));
-        texData[rowOffset + x] = norm;
-      }
+    const base0 = s0 * planeSize;
+    const base1 = s1 * planeSize;
+    const dstBase = uz * planeSize;
+    for (let i = 0; i < planeSize; i++) {
+      const val = volume[base0 + i] * oneMinusFrac + volume[base1 + i] * frac;
+      let n = ((val - lower) / ww) * 255;
+      if (n < 0) n = 0; else if (n > 255) n = 255;
+      texData[dstBase + i] = n;
     }
   }
 
